@@ -1,16 +1,6 @@
 ---
 name: channel-whitelist
 description: Manage the list of callers authorized to send messages to the agent via external channels.
-triggers:
-  - whitelist
-  - allow access
-  - authorize caller
-  - add to whitelist
-  - remove from whitelist
-  - block caller
-  - who can message
-  - show allowed senders
-  - config path
 metadata:
   bootstrap: true
   always: false

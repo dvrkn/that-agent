@@ -1,14 +1,6 @@
 ---
 name: agent-orchestrator
 description: Deploy, scope, and manage child agents for parallel task execution. Covers spawning, workspace sharing, memory-based team evolution, and result aggregation.
-triggers:
-  - orchestrate agents
-  - spawn subagent
-  - deploy child agent
-  - team of agents
-  - multi-agent
-  - delegate task
-  - agent hierarchy
 metadata:
   bootstrap: true
   version: 1.0.0

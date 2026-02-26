@@ -192,8 +192,6 @@ Minimal valid frontmatter:
 ---
 name: my-skill
 description: What this skill does
-triggers:
-  - keyword phrase
 ---
 ```
 

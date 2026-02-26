@@ -1,13 +1,6 @@
 ---
 name: agent-worktree
 description: Coordinate multiple agents working on the same repository using isolated git worktree branches. Use when orchestrating parallel agent work, reviewing changes from child agents, or merging completed work.
-triggers:
-  - orchestrate
-  - worktree
-  - parallel agents
-  - spawn agent
-  - multi-agent
-  - isolated branch
 metadata:
   bootstrap: true
   version: 1.0.0

@@ -1,15 +1,6 @@
 ---
 name: that-plugins
 description: Build practical agent plugins (commands, skills, routines, activations, emojis), install them, and verify hot-reload behavior.
-triggers:
-  - plugin
-  - plugins
-  - build plugin
-  - create plugin
-  - activate plugin
-  - routine
-  - activation
-  - emoji pack
 metadata:
   bootstrap: true
   always: false
