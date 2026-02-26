@@ -17,6 +17,10 @@ Its capabilities, its deployed services, its environment — everything is expre
 
 The foundation underneath that loop — one runtime, one tool stack, one continuity model across every execution path — is deliberately stable. Sandboxing, memory, channels, and the eval harness are not afterthoughts; they are the substrate that makes autonomous self-management safe and testable. Whether the agent is running a CLI task, holding a TUI conversation, listening on Telegram, or being scored against an eval scenario, the same orchestration loop and the same policy-governed tools are in play. The result is an agent that behaves consistently no matter how you talk to it, evolves through its own work rather than operator intervention, and can be evaluated against a regression suite at any point in its development.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
+```
+
 ## What You Get
 
 - **Persistent memory** -- SQLite-backed recall that survives restarts and session boundaries
