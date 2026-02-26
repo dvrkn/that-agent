@@ -215,15 +215,6 @@ let truncated = match s.char_indices().nth(800) {
 };
 ```
 
-### rig-core Imports
-
-Two separate traits are needed and both must be in scope or you get confusing "method not found" errors:
-
-```rust
-use rig::client::ProviderClient;    // needed for Client::from_env()
-use rig::client::CompletionClient;  // needed for client.agent()
-```
-
 ### Docker Build Context Must Include the Full Workspace
 
 `cargo build` requires the full workspace `Cargo.toml` and all member crates to be present in the build context. Do not try to copy only a subset of crates — rsync the entire workspace root into a temp dir and use that as the Docker build context.

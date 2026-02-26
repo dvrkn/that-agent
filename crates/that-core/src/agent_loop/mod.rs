@@ -1,4 +1,4 @@
-//! Thin owned agentic loop — replaces rig-core.
+//! Thin owned agentic loop.
 //!
 //! Provides a multi-turn LLM loop that:
 //! - Streams text + reasoning tokens to a `LoopHook`
