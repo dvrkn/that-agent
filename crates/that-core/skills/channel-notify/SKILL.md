@@ -1,21 +1,24 @@
 ---
 name: channel-notify
-description: Explains when and how to proactively notify the human operator during long-running tasks, without pausing to wait for a response.
+description: Explains when and how to proactively notify the human operator during long-running tasks, without pausing to wait for a response. Also covers sending file attachments mid-task.
 metadata:
   bootstrap: true
   always: true
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # Channel Notify
 
-You have a built-in tool called `channel_notify` that lets you send a one-way message to the
-human operator at any point during a task — without interrupting your work or waiting for a reply.
+You have two built-in tools for reaching the human operator mid-task without interrupting your
+work or waiting for a reply:
 
-Use it when you want to share something meaningful as you go, rather than revealing everything
+- **`channel_notify`** — send a short text message.
+- **`channel_send_file`** — send a file from the filesystem as an attachment.
+
+Use them when you want to share something meaningful as you go, rather than revealing everything
 only in the final response.
 
-## When to Use It
+## `channel_notify` — Text Notifications
 
 Use `channel_notify` when:
 
@@ -28,23 +31,27 @@ Use `channel_notify` when:
 - You have reached a natural checkpoint before a potentially irreversible action (but note:
   if you actually need approval, use the `human_ask` tool instead).
 
-## When NOT to Use It
-
-Do not use `channel_notify` when:
+Do **not** use `channel_notify` when:
 
 - You actually need the human to make a decision or give approval — use `human_ask` instead.
 - The task is short and the final response will speak for itself.
 - The update adds noise without useful information (avoid "still working…" spam).
+
+## `channel_send_file` — File Attachments
+
+Use `channel_send_file` when you have generated a file (report, export, image, log, etc.) and
+want to deliver it to the operator mid-task without waiting for a reply.
+
+Parameters:
+- `path` *(required)* — path to the file on the local filesystem.
+- `caption` *(optional)* — a short description shown alongside the file.
+- `channel` *(optional)* — specific channel ID to target; omit to deliver to all active channels.
+
+Channels with native file support (such as Telegram) will deliver the file as a proper
+attachment. Other channels will receive a text notification describing the filename and size.
 
 ## Tone and Formatting
 
 Keep notifications concise and specific. A good notification tells the human what happened or
 was found, not just that you are working. Follow the active channel's formatting conventions
 (visible in the **Active Channels** section of your context).
-
-## Example Intent (not literal script)
-
-When you have finished scanning a large set of inputs and are about to start generating output,
-a brief notification like "Finished analysis of N items — starting synthesis now" is helpful.
-When you are three minutes into a five-step pipeline and step two just completed successfully,
-a quick status ping keeps the human informed without requiring them to wait and wonder.

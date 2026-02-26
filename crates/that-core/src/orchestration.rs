@@ -16,7 +16,7 @@ use crate::config::{AgentDef, WorkspaceConfig};
 use crate::control::cli::{AgentCommands, SessionCommands, SkillCommands};
 use crate::default_skills;
 use crate::heartbeat;
-use crate::hooks::{channel_notify_tool_def, ChannelHook};
+use crate::hooks::{channel_notify_tool_def, channel_send_file_tool_def, ChannelHook};
 use crate::sandbox::SandboxClient;
 use crate::session::{
     new_run_id, rebuild_history, rebuild_history_recent, RunStatus, SessionManager,
@@ -4278,10 +4278,11 @@ pub async fn execute_agent_run_channel(
         let skill_roots = resolved_skill_roots(agent);
         let tools_config = load_agent_config(&container, agent);
 
-        // Add channel_notify tool: the ChannelHook intercepts calls and routes them
+        // Add channel-specific tools: ChannelHook intercepts calls and routes them
         // to the router without hitting dispatch().
         let mut tools = all_tool_defs(&container);
         tools.push(channel_notify_tool_def());
+        tools.push(channel_send_file_tool_def());
 
         let api_key = match api_key_for_provider(&agent.provider) {
             Ok(k) => k,

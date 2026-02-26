@@ -76,6 +76,42 @@ fn tool_result_is_error(result_json: &str) -> bool {
     false
 }
 
+/// Return the `channel_send_file` tool schema.
+///
+/// Include this in the tool list alongside [`channel_notify_tool_def`] when a
+/// [`ChannelRouter`] is active. [`ChannelHook`] intercepts calls and reads the
+/// file from disk before routing an [`that_channels::channel::ChannelEvent::Attachment`]
+/// to the router — `dispatch()` is never reached.
+pub fn channel_send_file_tool_def() -> ToolDef {
+    ToolDef {
+        name: "channel_send_file".into(),
+        description: "Send a file from the local filesystem as an attachment to the human \
+            operator via the active channel. Supported by channels that have native file \
+            delivery (e.g. Telegram). Other channels receive a plain-text notification \
+            with the filename and size instead. Use this to share generated reports, \
+            exports, images, or any other file output mid-task without waiting for a reply."
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or workspace-relative path to the file to send."
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional short description shown alongside the file."
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional channel ID to target. Omit to broadcast to all channels."
+                }
+            },
+            "required": ["path"]
+        }),
+    }
+}
+
 /// Return the `channel_notify` tool schema.
 ///
 /// Include this in the tool list when the agent is running in channel mode
@@ -267,6 +303,63 @@ impl LoopHook for ChannelHook {
                     result_json: r#"{"sent":true}"#.to_string(),
                 }
             }
+            "channel_send_file" => {
+                let args = serde_json::from_str::<serde_json::Value>(args_json)
+                    .unwrap_or_default();
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let caption = args
+                    .get("caption")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let target_channel = args
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let result_json = if path.is_empty() {
+                    r#"{"error":"path is required"}"#.to_string()
+                } else {
+                    match tokio::fs::read(path).await {
+                        Ok(bytes) => {
+                            let filename = std::path::Path::new(path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("attachment")
+                                .to_string();
+                            let mime_type = mime_type_hint(&filename);
+                            let size = bytes.len();
+                            let event = that_channels::channel::ChannelEvent::Attachment {
+                                filename: filename.clone(),
+                                data: std::sync::Arc::new(bytes),
+                                caption,
+                                mime_type,
+                            };
+                            let cid = target_channel
+                                .as_deref()
+                                .or(self.channel_id.as_deref());
+                            if let Some(cid) = cid {
+                                let _ = self
+                                    .router
+                                    .send_to(cid, &event, self.target.as_ref())
+                                    .await;
+                            } else {
+                                self.router.broadcast(&event).await;
+                            }
+                            serde_json::json!({
+                                "sent": true,
+                                "filename": filename,
+                                "size_bytes": size,
+                            })
+                            .to_string()
+                        }
+                        Err(e) => serde_json::json!({
+                            "error": format!("Failed to read file '{path}': {e}")
+                        })
+                        .to_string(),
+                    }
+                };
+                HookAction::Skip { result_json }
+            }
             _ => {
                 // Surface all tool invocations to the active channel when not
                 // in a silent/background run, so users can follow along live.
@@ -316,4 +409,30 @@ impl LoopHook for ChannelHook {
             }
         }
     }
+}
+
+/// Guess a MIME type string from a filename extension, for use in the Attachment event.
+fn mime_type_hint(filename: &str) -> Option<String> {
+    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "pdf" => "application/pdf",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "mp4" => "video/mp4",
+            "mp3" => "audio/mpeg",
+            "ogg" => "audio/ogg",
+            "csv" => "text/csv",
+            "txt" | "log" => "text/plain",
+            "md" => "text/markdown",
+            "json" => "application/json",
+            "zip" => "application/zip",
+            "tar" => "application/x-tar",
+            "gz" => "application/gzip",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }

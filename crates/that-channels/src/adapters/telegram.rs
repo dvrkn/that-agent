@@ -317,6 +317,47 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Send a file as a Telegram document using `sendDocument` (multipart form upload).
+    ///
+    /// Falls back to a plain-text caption-only message when the bytes are empty.
+    async fn send_document(
+        &self,
+        chat_id: &str,
+        filename: &str,
+        data: &[u8],
+        caption: Option<&str>,
+    ) -> Result<()> {
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(
+                mime_type_from_filename(filename)
+                    .unwrap_or("application/octet-stream"),
+            )?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("document", part);
+        if let Some(cap) = caption.filter(|s| !s.is_empty()) {
+            form = form.text("caption", cap.to_string());
+        }
+
+        let resp = self
+            .http
+            .post(self.api_url("sendDocument"))
+            .multipart(form)
+            .send()
+            .await
+            .context("Telegram sendDocument request failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("Telegram sendDocument JSON parse failed")?;
+
+        if resp["ok"].as_bool() != Some(true) {
+            let desc = resp["description"].as_str().unwrap_or("unknown error");
+            anyhow::bail!("Telegram sendDocument failed: {desc}");
+        }
+        Ok(())
+    }
+
     /// Delete a Telegram message by chat_id and message_id.
     async fn delete_message(&self, chat_id: &str, message_id: i64) -> Result<()> {
         let body = serde_json::json!({
@@ -391,6 +432,7 @@ impl Channel for TelegramAdapter {
             command_menu: true,
             max_message_len: TELEGRAM_MAX_CHARS,
             message_edit: true,
+            attachments: true,
         }
     }
 
@@ -645,6 +687,16 @@ impl Channel for TelegramAdapter {
             }
             ChannelEvent::Notify(msg) => {
                 self.send_plain(&chat_id, msg).await?;
+                MessageHandle::default()
+            }
+            ChannelEvent::Attachment {
+                filename,
+                data,
+                caption,
+                ..
+            } => {
+                self.send_document(&chat_id, filename, data, caption.as_deref())
+                    .await?;
                 MessageHandle::default()
             }
         };
@@ -985,6 +1037,32 @@ fn ask_key(chat_id: &str, sender_id: Option<&str>) -> String {
         Some(sender) if !sender.is_empty() => format!("chat:{chat_id}:sender:{sender}"),
         _ => format!("chat:{chat_id}:sender:*"),
     }
+}
+
+/// Guess a MIME type from a filename extension.
+///
+/// Returns a static MIME type string or `None` for unknown extensions. Used
+/// to set the `Content-Type` when uploading documents to Telegram.
+fn mime_type_from_filename(filename: &str) -> Option<&'static str> {
+    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" => "video/mp4",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "csv" => "text/csv",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        _ => return None,
+    })
 }
 
 fn is_markdown_parse_error(status: reqwest::StatusCode, body: &str) -> bool {

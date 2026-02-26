@@ -3,6 +3,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::prelude::*;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::body::Body;
@@ -144,6 +146,7 @@ impl Channel for HttpAdapter {
             command_menu: false,
             max_message_len: usize::MAX,
             message_edit: false,
+            attachments: true,
         }
     }
 
@@ -247,6 +250,9 @@ impl Channel for HttpAdapter {
             ChannelEvent::Done { .. } | ChannelEvent::Error(_) => {
                 self.state.active_requests.remove(request_id);
             }
+            // Attachments are not routable via a per-request sink (no binary SSE),
+            // so we skip the sink lookup and let the event fan-out to any subscriber.
+            ChannelEvent::Attachment { .. } => {}
             _ => {}
         }
 
@@ -670,6 +676,25 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
                 )
             }
         }
+        ChannelEvent::Attachment {
+            filename,
+            data,
+            caption,
+            mime_type,
+        } => Some(
+            SseEvent::default()
+                .event("attachment")
+                .data(
+                    serde_json::json!({
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "caption": caption,
+                        "size_bytes": data.len(),
+                        "data_base64": BASE64_STANDARD.encode(data.as_ref()),
+                    })
+                    .to_string(),
+                ),
+        ),
         // Events with no SSE representation.
         ChannelEvent::TypingIndicator
         | ChannelEvent::ThinkingDelta(_)

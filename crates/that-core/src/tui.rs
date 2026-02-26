@@ -2300,6 +2300,20 @@ impl that_channels::Channel for TuiChannel {
                 delay_secs: *delay_secs,
             }),
             ChannelEvent::Notify(msg) => self.tx.send(TuiEvent::Token(format!("\n📢 {msg}\n"))),
+            ChannelEvent::Attachment {
+                filename,
+                data,
+                caption,
+                ..
+            } => {
+                let size_kb = data.len() as f64 / 1024.0;
+                let line = if let Some(cap) = caption.as_deref().filter(|s| !s.is_empty()) {
+                    format!("\n📎 {filename} ({size_kb:.1} KB) — {cap}\n")
+                } else {
+                    format!("\n📎 {filename} ({size_kb:.1} KB)\n")
+                };
+                self.tx.send(TuiEvent::Token(line))
+            }
             // TUI has its own visual rendering — typing indicators are not needed.
             ChannelEvent::TypingIndicator => {
                 return Ok(that_channels::MessageHandle::default())

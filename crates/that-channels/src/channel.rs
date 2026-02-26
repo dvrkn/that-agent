@@ -46,6 +46,22 @@ pub enum ChannelEvent {
     },
     /// A proactive mid-task notification from the agent (via channel_notify tool).
     Notify(String),
+    /// A file attachment sent by the agent (via channel_send_file tool).
+    ///
+    /// Adapters that support attachments (`capabilities().attachments == true`) should
+    /// deliver the file using their native file-sending API (e.g. Telegram `sendDocument`).
+    /// Adapters that do not support attachments should fall back to a plain-text
+    /// notification describing the file.
+    Attachment {
+        /// Suggested filename for the recipient (e.g. "report.csv").
+        filename: String,
+        /// Raw file bytes. Wrapped in `Arc` to avoid expensive clones during fan-out.
+        data: std::sync::Arc<Vec<u8>>,
+        /// Optional caption shown alongside the file.
+        caption: Option<String>,
+        /// Optional MIME type hint (e.g. "text/csv", "application/pdf").
+        mime_type: Option<String>,
+    },
 }
 
 /// A handle to a previously sent message, returned by [`Channel::send_event`].
@@ -82,6 +98,11 @@ pub struct ChannelCapabilities {
     pub max_message_len: usize,
     /// Adapter supports editing previously sent messages via [`Channel::update_message`].
     pub message_edit: bool,
+    /// Adapter can deliver file attachments natively (e.g. Telegram `sendDocument`).
+    ///
+    /// When `false`, the router will fall back to sending a plain-text notification
+    /// describing the file instead of delivering the bytes.
+    pub attachments: bool,
 }
 
 impl Default for ChannelCapabilities {
@@ -93,6 +114,7 @@ impl Default for ChannelCapabilities {
             command_menu: false,
             max_message_len: 4096,
             message_edit: false,
+            attachments: false,
         }
     }
 }
