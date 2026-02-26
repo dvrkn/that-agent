@@ -17,9 +17,23 @@ Its capabilities, its deployed services, its environment — everything is expre
 
 The foundation underneath that loop — one runtime, one tool stack, one continuity model across every execution path — is deliberately stable. Sandboxing, memory, channels, and the eval harness are not afterthoughts; they are the substrate that makes autonomous self-management safe and testable. Whether the agent is running a CLI task, holding a TUI conversation, listening on Telegram, or being scored against an eval scenario, the same orchestration loop and the same policy-governed tools are in play. The result is an agent that behaves consistently no matter how you talk to it, evolves through its own work rather than operator intervention, and can be evaluated against a regression suite at any point in its development.
 
+### VPS one-liner (k3s)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 ```
+
+Installs k3s on a fresh Linux VPS, prompts for agent name, description, and API credentials, then deploys the agent into the cluster. The description you provide is interpreted by the LLM at first boot to generate the agent's `Soul.md` and `Identity.md`.
+
+### Existing Kubernetes cluster
+
+```bash
+cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
+# edit namespace, configmap, secret, and image reference
+kubectl apply -k deploy/k8s/overlays/my-agent
+```
+
+See [OPERATORS.md](./OPERATORS.md) for full configuration reference, environment variables, overlay examples, and observability setup.
 
 ## What You Get
 
@@ -124,26 +138,6 @@ evals/scenarios/     # TOML scenario definitions
 sandbox/             # Dockerfile + build script
 deploy/k8s/          # Kubernetes manifests
 ```
-
-## Deployment
-
-### VPS one-liner (k3s)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
-```
-
-Installs k3s on a fresh Linux VPS, prompts for agent name, description, and API credentials, then deploys the agent into the cluster. The description you provide is interpreted by the LLM at first boot to generate the agent's `Soul.md` and `Identity.md`.
-
-### Existing Kubernetes cluster
-
-```bash
-cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
-# edit namespace, configmap, secret, and image reference
-kubectl apply -k deploy/k8s/overlays/my-agent
-```
-
-See [OPERATORS.md](./OPERATORS.md) for full configuration reference, environment variables, overlay examples, and observability setup.
 
 ## Contributing
 
