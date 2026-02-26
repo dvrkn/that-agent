@@ -39,6 +39,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OVERLAY_DIR=""              # set after we know the agent name
 
+# In-cluster registry — NodePort on the host so k3s containerd can pull,
+# ClusterIP DNS so BuildKit (inside pods) can push.
+REGISTRY_NODEPORT=30500
+REGISTRY_NAMESPACE="that-registry"
+# k3s image refs use this hostname; registries.yaml maps it → localhost:NodePort
+REGISTRY_PULL_HOST="registry.localhost:5000"
+# BuildKit (running inside a pod) pushes via in-cluster DNS
+REGISTRY_PUSH_ENDPOINT="registry.${REGISTRY_NAMESPACE}.svc.cluster.local:5000"
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -108,8 +117,108 @@ else
   die "No running Kubernetes cluster found. Remove --no-k3s to install k3s automatically."
 fi
 
-# ── Step 2: Gather configuration ────────────────────────────────────────────
-header "Step 2 — Agent configuration"
+# ── Step 2: In-cluster image registry ───────────────────────────────────────
+header "Step 2 — In-cluster image registry"
+
+info "Deploying registry:2 into namespace '${REGISTRY_NAMESPACE}' (NodePort ${REGISTRY_NODEPORT})…"
+
+${KUBECTL} apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${REGISTRY_NAMESPACE}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: ${REGISTRY_NAMESPACE}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: ${REGISTRY_NAMESPACE}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: ${REGISTRY_NAMESPACE}
+spec:
+  selector:
+    app: registry
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: ${REGISTRY_NODEPORT}
+  type: NodePort
+EOF
+
+# Tell k3s containerd to resolve the pull hostname via the NodePort on the host.
+# BuildKit (inside pods) reaches the registry via in-cluster ClusterIP DNS.
+REGISTRIES_YAML="/etc/rancher/k3s/registries.yaml"
+info "Writing ${REGISTRIES_YAML} (maps ${REGISTRY_PULL_HOST} → http://localhost:${REGISTRY_NODEPORT})…"
+$SUDO tee "${REGISTRIES_YAML}" > /dev/null <<EOF
+mirrors:
+  "${REGISTRY_PULL_HOST}":
+    endpoint:
+      - "http://localhost:${REGISTRY_NODEPORT}"
+EOF
+
+info "Restarting k3s to apply registry mirror configuration…"
+$SUDO systemctl restart k3s
+local_timeout=60
+while ! ${KUBECTL} get nodes &>/dev/null 2>&1; do
+  local_timeout=$((local_timeout - 1))
+  [[ $local_timeout -le 0 ]] && die "k3s did not recover after restart. Check: journalctl -u k3s"
+  sleep 1
+done
+
+info "Waiting for registry pod to be ready…"
+${KUBECTL} -n "${REGISTRY_NAMESPACE}" rollout status deploy/registry --timeout=120s
+ok "Registry ready — pull host: ${REGISTRY_PULL_HOST}, push endpoint: ${REGISTRY_PUSH_ENDPOINT}"
+
+# ── Step 3: Gather configuration ────────────────────────────────────────────
+header "Step 3 — Agent configuration"
 
 echo ""
 echo "  This installer will create a long-lived autonomous agent running on your cluster."
@@ -210,8 +319,8 @@ case "${CONFIRM:-y}" in
   *) info "Aborted."; exit 0 ;;
 esac
 
-# ── Step 3: Build or pull image ──────────────────────────────────────────────
-header "Step 3 — Container image"
+# ── Step 4: Build or pull image ──────────────────────────────────────────────
+header "Step 4 — Container image"
 
 if [[ -f "${REPO_ROOT}/sandbox/build.sh" ]] && command -v docker &>/dev/null; then
   echo ""
@@ -237,8 +346,8 @@ else
   info "Using image: ${AGENT_IMAGE}"
 fi
 
-# ── Step 4: Generate overlay ─────────────────────────────────────────────────
-header "Step 4 — Generating Kubernetes overlay"
+# ── Step 5: Generate overlay ─────────────────────────────────────────────────
+header "Step 5 — Generating Kubernetes overlay"
 
 mkdir -p "${OVERLAY_DIR}"
 
@@ -285,7 +394,8 @@ data:
   THAT_SANDBOX_MODE: "kubernetes"
   THAT_TRUSTED_LOCAL_SANDBOX: "1"
   THAT_SANDBOX_K8S_NAMESPACE: "${AGENT_NAMESPACE}"
-  THAT_SANDBOX_K8S_REGISTRY: "registry.localhost:5000"
+  THAT_SANDBOX_K8S_REGISTRY: "${REGISTRY_PULL_HOST}"
+  THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT: "${REGISTRY_PUSH_ENDPOINT}"
 EOF
 
 # secret.yaml
@@ -311,8 +421,8 @@ $SUDO chmod 600 "${OVERLAY_DIR}/secret.yaml"
 
 ok "Overlay written to ${OVERLAY_DIR}"
 
-# ── Step 5: Deploy ────────────────────────────────────────────────────────────
-header "Step 5 — Deploying to cluster"
+# ── Step 6: Deploy ────────────────────────────────────────────────────────────
+header "Step 6 — Deploying to cluster"
 
 info "Applying manifests…"
 ${KUBECTL} apply -k "${OVERLAY_DIR}"
