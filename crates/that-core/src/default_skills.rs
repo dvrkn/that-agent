@@ -1,0 +1,84 @@
+/// Default skills bundled with that-agent.
+///
+/// Each skill is embedded at compile time via `include_str!`. Skills with
+/// `bootstrap: true` in their frontmatter are written to `~/.that-agent/skills/`
+/// on every agent startup, ensuring the installed versions always match the
+/// current binary.
+
+struct DefaultSkill {
+    /// Directory name under `~/.that-agent/skills/`
+    name: &'static str,
+    content: &'static str,
+}
+
+const DEFAULT_SKILLS: &[DefaultSkill] = &[
+    DefaultSkill {
+        name: "skill-creator",
+        content: include_str!("../skills/skill-creator/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "channel-notify",
+        content: include_str!("../skills/channel-notify/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "telegram-format",
+        content: include_str!("../skills/telegram-format/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "channel-whitelist",
+        content: include_str!("../skills/channel-whitelist/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "task-manager",
+        content: include_str!("../skills/task-manager/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "that-plugins",
+        content: include_str!("../skills/that-plugins/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "agent-worktree",
+        content: include_str!("../skills/agent-worktree/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "agent-orchestrator",
+        content: include_str!("../skills/agent-orchestrator/SKILL.md"),
+    },
+];
+
+/// Install all bundled default skills into the agent's skills directory.
+///
+/// Only skills whose frontmatter contains `bootstrap: true` are written.
+/// Files are always overwritten so updates ship with the binary.
+pub fn install_default_skills(agent_name: &str) {
+    let Some(skills_dir) = crate::skills::skills_dir_local(agent_name) else {
+        tracing::warn!("Could not resolve home directory — skipping default skill install");
+        return;
+    };
+
+    for skill in DEFAULT_SKILLS {
+        if !has_bootstrap_flag(skill.content) {
+            continue;
+        }
+
+        let skill_dir = skills_dir.join(skill.name);
+        if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+            tracing::warn!(skill = skill.name, error = %e, "Failed to create skill directory");
+            continue;
+        }
+
+        let dest = skill_dir.join("SKILL.md");
+        if let Err(e) = std::fs::write(&dest, skill.content) {
+            tracing::warn!(skill = skill.name, error = %e, "Failed to write default skill");
+        } else {
+            tracing::debug!(skill = skill.name, "Default skill installed");
+        }
+    }
+}
+
+/// Return true if the SKILL.md frontmatter contains `bootstrap: true` under `metadata:`.
+fn has_bootstrap_flag(content: &str) -> bool {
+    crate::skills::parse_frontmatter(content)
+        .map(|(_, _, meta)| meta.bootstrap)
+        .unwrap_or(false)
+}

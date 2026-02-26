@@ -1,0 +1,235 @@
+name        = "Plugin Lifecycle — Holistic Judge"
+description = """
+Judge-first evaluation of plugin lifecycle behavior across multiple turns.
+
+This scenario intentionally keeps deterministic assertions lightweight and uses the LLM
+judge rubric to score full-run behavior: quality of implementation decisions, cross-session
+continuity after reset, evidence consistency, clean disable semantics, and post-disable
+adaptation.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 35
+sandbox         = true
+tags            = ["plugins", "lifecycle", "cross-session", "llm-judge", "holistic"]
+timeout_secs    = 300
+
+# ── Pre-cleanup / bootstrap ───────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "rm -rf ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin 2>/dev/null; true"
+
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval/plugins"
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_snapshot_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-health-snapshot.json /tmp/eval-status-after-disable.json 2>/dev/null || true
+true
+"""
+
+# ── Turn 1: Create plugin naturally ───────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I want you to set yourself up with a plugin called `eval_snapshot_plugin` so you can
+consistently produce health snapshot JSON in future requests.
+
+The expected shape is:
+- plugin_marker = EVAL_PLUGIN_LIFECYCLE_V1
+- service
+- status
+- checked_at_utc
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin -name SKILL.md -type f | grep -q ."
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin -name SKILL.md -type f -print0 | xargs -0 grep -q 'EVAL_PLUGIN_LIFECYCLE_V1'"
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 2: Reuse after reset ─────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Generate a health snapshot for service `checkout-api` with status `ok` and save it as
+`/tmp/eval-health-snapshot.json`.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-health-snapshot.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-health-snapshot.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -c \"import json; d=json.load(open('/tmp/eval-health-snapshot.json')); assert d.get('plugin_marker')=='EVAL_PLUGIN_LIFECYCLE_V1', d; assert d.get('service')=='checkout-api', d; assert d.get('status')=='ok', d; assert 'checked_at_utc' in d, d\""
+
+# ── Turn 3: Disable, keep files ───────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "Disable plugin `eval_snapshot_plugin`, but do not delete any of its files."
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -d ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+plugin_id = "eval_snapshot_plugin"
+manifest_path = Path.home() / ".that-agent/agents/eval/plugins" / plugin_id / "plugin.toml"
+state_path = Path.home() / ".that-agent/agents/eval/plugins/.plugin-state.toml"
+
+manifest = tomllib.loads(manifest_path.read_text())
+enabled = bool(manifest.get("enabled_by_default", True))
+
+if state_path.exists() and state_path.read_text().strip():
+    state = tomllib.loads(state_path.read_text())
+    enabled = bool(
+        state.get("plugins", {})
+             .get(plugin_id, {})
+             .get("enabled", enabled)
+    )
+
+assert enabled is False, f"Plugin still enabled (effective={enabled})"
+PY
+"""
+
+# ── Turn 4: Post-disable behavior probe ───────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Now create `/tmp/eval-status-after-disable.json` with only `service` and `status` for
+`billing-api` set to `degraded`.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-status-after-disable.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-status-after-disable.json > /dev/null"
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -rf ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin 2>/dev/null
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_snapshot_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-health-snapshot.json /tmp/eval-status-after-disable.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "implementation_quality"
+description = """
+Agent interpreted the natural request and produced a coherent plugin implementation
+that supports the specified snapshot contract, without requiring hand-held instructions
+about exact tools or internal paths.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "cross_session_continuity"
+description = """
+After session reset, agent still applied prior setup correctly. High score requires
+evidence in transcript/tool calls that the behavior came from persisted plugin/skill
+state rather than accidental one-off output.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "evidence_consistency"
+description = """
+Across the run, assistant claims remained consistent with observed tool evidence and
+earlier outputs. Penalize contradictions such as saying a file was not created when
+tool results already showed it exists.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "disable_semantics"
+description = """
+Agent disabled the plugin cleanly without deleting it, and did not conflate disable
+with removal.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "post_disable_adaptation"
+description = """
+After disable, agent adapted behavior to the new request (`service` + `status` only)
+and did not keep blindly applying the old plugin contract.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "autonomy_and_recovery"
+description = """
+Agent stayed autonomous end-to-end (no unnecessary clarification loops) and recovered
+reasonably from any tool errors/warnings instead of stalling.
+"""
+weight = 10

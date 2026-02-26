@@ -1,0 +1,13 @@
+[package]
+name = "that-sandbox"
+description = "Docker and Kubernetes execution boundary for sandboxed agent operations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }

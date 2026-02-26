@@ -1,0 +1,172 @@
+name        = "Heartbeat Task Lifecycle"
+description = """
+Evaluates heartbeat discipline in a controlled multi-turn flow:
+1) author a valid Heartbeat.md entry in pending state,
+2) process the pending heartbeat task,
+3) write the expected artifact,
+4) mark the heartbeat entry done with a last_run timestamp.
+
+This scenario tests heartbeat semantics even without waiting for the background poller.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 30
+sandbox         = true
+tags            = ["heartbeat", "autonomy", "llm-judge", "state-transition"]
+timeout_secs    = 300
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+HB="$HOME/.that-agent/agents/{{agent_name}}/Heartbeat.md"
+rm -f "$HB" 2>/dev/null || true
+mkdir -p "$(dirname "$HB")"
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-heartbeat-report.json 2>/dev/null || true
+true
+"""
+
+# ── Turn 1: Create pending heartbeat task ─────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Create your `Heartbeat.md` for this agent and add exactly one pending entry:
+
+Title: Eval Heartbeat Report
+priority: high
+schedule: once
+status: pending
+
+Body requirement:
+- Build `/tmp/eval-heartbeat-report.json` with JSON fields:
+  - heartbeat_marker = EVAL_HEARTBEAT_V1
+  - report = "daily-check"
+  - status = "ok"
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/{{agent_name}}/Heartbeat.md"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q '^## Eval Heartbeat Report$' ~/.that-agent/agents/{{agent_name}}/Heartbeat.md"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q '^status: pending$' ~/.that-agent/agents/{{agent_name}}/Heartbeat.md"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q '^schedule: once$' ~/.that-agent/agents/{{agent_name}}/Heartbeat.md"
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 2: Process heartbeat task and mark completion ────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Run a heartbeat check-in now:
+- process pending items in your Heartbeat.md,
+- execute the Eval Heartbeat Report item,
+- create `/tmp/eval-heartbeat-report.json` exactly as specified,
+- then update that heartbeat entry to `status: done`,
+- and set `last_run` to a valid RFC3339 timestamp.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-heartbeat-report.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-heartbeat-report.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -c \"import json; d=json.load(open('/tmp/eval-heartbeat-report.json')); assert d.get('heartbeat_marker')=='EVAL_HEARTBEAT_V1', d; assert d.get('report')=='daily-check', d; assert d.get('status')=='ok', d\""
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+python3 - <<'PY'
+from pathlib import Path
+import re
+from datetime import datetime
+
+hb = Path.home() / ".that-agent/agents/{{agent_name}}/Heartbeat.md"
+text = hb.read_text()
+
+assert "## Eval Heartbeat Report" in text, "missing heartbeat entry title"
+
+block_match = re.search(
+    r"## Eval Heartbeat Report\\n(?P<meta>(?:.+\\n)+?)\\n",
+    text,
+)
+assert block_match, "unable to parse heartbeat metadata block"
+meta = block_match.group("meta")
+
+assert re.search(r"^status:\\s*done\\s*$", meta, re.MULTILINE), "status not done"
+last_run_match = re.search(r"^last_run:\\s*(.+)\\s*$", meta, re.MULTILINE)
+assert last_run_match, "missing last_run"
+datetime.fromisoformat(last_run_match.group(1).strip().replace("Z", "+00:00"))
+PY
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -f "$HOME/.that-agent/agents/{{agent_name}}/Heartbeat.md" 2>/dev/null || true
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-heartbeat-report.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "heartbeat_file_contract"
+description = """
+Agent authored a valid heartbeat entry with correct metadata fields and actionable body
+instructions, not a vague placeholder.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "heartbeat_task_execution"
+description = """
+Agent executed the pending heartbeat task end-to-end and produced the required report
+artifact with the exact contract.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "state_transition_discipline"
+description = """
+Agent correctly transitioned heartbeat status from pending to done and wrote a valid
+last_run timestamp after completion.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "autonomy_without_stalling"
+description = """
+Agent executed the workflow autonomously, without unnecessary clarification loops or
+waiting for extra approvals.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "evidence_consistency"
+description = """
+Assistant claims align with tool evidence and generated artifacts. Contradictions are
+penalized.
+"""
+weight = 10

@@ -1,0 +1,139 @@
+name        = "Autonomous Task Chaining — Multi-Step With No Guidance"
+description = """
+Evaluates whether the agent independently decomposes a loosely-specified goal into
+concrete sub-tasks and executes them end-to-end without asking for clarification or
+waiting for approval between steps.
+
+The prompt describes the desired outcome only. The agent must plan the approach,
+select tools, perform verification, handle any minor issues it encounters, and
+report what it accomplished — all without being hand-held.
+
+This scenario also checks that the agent stores a project summary in persistent memory
+at the end, so future sessions can pick up context without a full re-introduction.
+"""
+agent_name   = "default"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+judge_provider = "openai"
+judge_model    = "gpt-5.2-codex"
+max_turns    = 35
+sandbox      = true
+tags         = ["autonomy", "task-chaining", "memory", "long-lived"]
+timeout_secs = 300
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME rm -rf /workspace/eval-notes 2>/dev/null; true"
+
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-chain%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Single vague prompt — agent must work out the rest independently ───────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I'd like a small structured notes system set up at /workspace/eval-notes. It should:
+- Support adding notes with a title, body, and at least one tag
+- Store each note as a plain text file named after its creation timestamp
+- Provide a way to list all notes and to search notes by tag
+- Come with a brief README explaining how to use it
+
+When you are done, store a summary of what you built in your persistent memory so
+we can reference it in future sessions without having to re-explain the setup.
+"""
+
+# ── Assert: directory and core files exist ────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -d /workspace/eval-notes"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace/eval-notes -name \"README*\" | grep -q .'"
+# At least one executable or runnable entry point
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace/eval-notes -name \"*.sh\" -o -name \"*.py\" -o -name \"*.js\" | grep -q .'"
+
+# ── Assert: summary stored in memory ─────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE lower(content) LIKE '%eval-notes%' AND created_at > datetime('now', '-10 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME rm -rf /workspace/eval-notes 2>/dev/null; true"
+
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-chain%' OR (lower(content) LIKE '%eval-notes%' AND created_at > datetime('now', '-1 hour'))" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "autonomous_decomposition"
+description = """
+Agent broke the vague goal into concrete sub-tasks and executed them sequentially
+without asking for permission or clarification between steps. No "should I proceed?"
+questions. The transcript shows a clear plan-then-execute pattern.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "all_requirements_met"
+description = """
+The delivered system supports adding notes (title, body, tag), stores them as
+timestamp-named files, supports listing, and supports tag-based search. README exists
+and explains usage. Missing any of these lowers the score proportionally.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "verification_performed"
+description = """
+After building the system, the agent ran or inspected its own output to confirm
+correctness — for example by listing files, running the add command, or reading back
+a created note. Agent did not just claim completion without checking.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "memory_stored"
+description = """
+Agent called mem_add or mem_compact to store a summary of the notes system in
+persistent memory, without being specifically reminded to do so by the user — applying
+the good long-lived-agent practice of preserving project context for future sessions.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "no_unnecessary_clarification_loops"
+description = """
+Agent did not stall with repeated clarification/permission loops when sufficient context
+already existed. Brief clarification only when truly blocking is acceptable; repeated
+"should I proceed?" behavior is penalized.
+"""
+weight = 10

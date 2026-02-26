@@ -1,0 +1,130 @@
+name        = "Progressive Learning — Preference Retained Across Sessions"
+description = """
+Tests whether the agent carries learned working preferences across a session boundary
+without being reminded. In session A the user states how they want shell scripts written.
+After a history reset the agent receives a plain coding request with no mention of
+preferences. A high-scoring run recalls the stored preferences and applies them
+unprompted, demonstrating the memory-backed behavioural adaptation needed for a
+long-lived autonomous agent.
+"""
+agent_name   = "default"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+max_turns    = 15
+sandbox      = true
+tags         = ["memory", "preference", "long-lived", "autonomy"]
+timeout_secs = 150
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-pref%'" 2>/dev/null
+fi
+rm -f /tmp/eval-dir-check.sh 2>/dev/null
+true
+"""
+
+# ── Session A: state preferences in natural conversation ──────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Two things I always want when you write shell scripts:
+
+1. Use POSIX sh — the shebang should be #!/bin/sh and nothing bash-specific ever
+   (no arrays, no [[ ]], no $(...) process substitution, no local keyword).
+2. Always open with "set -eu" so the script aborts on errors and unset variables.
+
+These apply every time, no exceptions.
+"""
+
+# ── Assert: the preference was stored in memory ────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE (lower(content) LIKE '%posix%' OR lower(content) LIKE '#!/bin/sh%') AND created_at > datetime('now', '-5 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Session A (fresh): plain request — no reminder of preferences ──────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "Write me a script that checks whether a target directory exists and, if not, creates it together with a subdirectory called logs. It should print a status message for each action. Save the script to /tmp/eval-dir-check.sh"
+
+# ── Assert: script file was written (inside container) ────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-dir-check.sh"
+
+# ── Assert: script respects stored preferences (inside container) ─────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME grep -q '#!/bin/sh' /tmp/eval-dir-check.sh"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME grep -q 'set -eu' /tmp/eval-dir-check.sh"
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-pref%' OR (lower(content) LIKE '%posix sh%' AND lower(content) LIKE '%set -eu%') OR (lower(content) LIKE '%#!/bin/sh%' AND lower(content) LIKE '%set -eu%')" 2>/dev/null
+fi
+rm -f /tmp/eval-dir-check.sh 2>/dev/null
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "preference_stored"
+description = """
+Agent called mem_add (or equivalent) to persist the shell script preferences when
+the user stated them in session A — without being told to do so. Low score if the
+agent only acknowledged the preferences conversationally.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "preference_recalled"
+description = """
+In the fresh session, the agent invoked mem_recall or mem_search before writing the
+script — demonstrating it retrieved stored preferences rather than guessing. The
+transcript should show a tool call to memory before any file write.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "preference_applied"
+description = """
+The generated script at /tmp/eval-dir-check.sh uses #!/bin/sh and set -eu, matching
+the stored requirements, without the user repeating them. Bonus if it also avoids
+bash-specific constructs.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "script_correctness"
+description = """
+The script is functionally correct: it checks directory existence, creates the target
+and logs subdirectory if missing, and prints a status message for each action.
+"""
+weight = 10

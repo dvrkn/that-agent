@@ -1,0 +1,91 @@
+name        = "Skill Lifecycle"
+description = "Agent creates a skill, uses it, then deletes it — all in one session. Judge scores the full arc."
+agent_name  = "default"
+provider    = "openai"
+model       = "gpt-5.2-codex"
+max_turns   = 20
+sandbox     = true
+tags        = ["skills", "lifecycle"]
+timeout_secs = 240
+
+# ── Pre-cleanup: remove any leftover skill from a prior run ───────────────────
+[[steps]]
+type    = "run_command"
+command = "rm -rf ~/.that-agent/agents/{{agent_name}}/skills/json-formatter 2>/dev/null; true"
+
+# ── Turn 1: Create ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I'd like you to create a new skill for yourself that helps with writing well-formatted JSON files.
+It should kick in whenever someone asks to create or write a JSON file.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/{{agent_name}}/skills/json-formatter/SKILL.md"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q 'name:' ~/.that-agent/agents/{{agent_name}}/skills/json-formatter/SKILL.md"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q 'description:' ~/.that-agent/agents/{{agent_name}}/skills/json-formatter/SKILL.md"
+
+# ── Turn 2: Use ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Can you create a JSON file at /tmp/eval-data.json with this content: {"name": "eval", "version": 1, "tags": ["test", "lifecycle"]}
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-data.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-data.json > /dev/null"
+
+# ── Turn 3: Delete ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "I don't need that JSON formatter skill anymore. Please remove it."
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "! test -d ~/.that-agent/agents/{{agent_name}}/skills/json-formatter"
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "rm -rf ~/.that-agent/agents/{{agent_name}}/skills/json-formatter 2>/dev/null; docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-data.json 2>/dev/null; true"
+
+# ── Rubric ───────────────────────────────────────────────────────────────────
+[rubric]
+[[rubric.criteria]]
+name        = "skill_created_correctly"
+description = "Agent independently produced a valid skill with correct frontmatter (name, description, triggers) without being told which tool or workflow to use"
+weight      = 30
+
+[[rubric.criteria]]
+name        = "skill_applied"
+description = "Agent applied the newly created skill when handling the JSON file request, demonstrating it consults its own skills autonomously"
+weight      = 25
+
+[[rubric.criteria]]
+name        = "task_completed"
+description = "/tmp/eval-data.json was created inside the sandbox with valid, well-formed JSON content"
+weight      = 20
+
+[[rubric.criteria]]
+name        = "skill_deleted"
+description = "Agent fully removed the skill when asked, leaving no leftover files in the skills directory"
+weight      = 25

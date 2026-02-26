@@ -1,0 +1,84 @@
+name        = "Git Iteration"
+description = "Scaffolds a git repository with a Python CLI project, then iterates to add features."
+agent_name  = "default"
+provider    = "openai"
+model       = "gpt-5.2-codex"
+max_turns   = 30
+sandbox     = true
+tags        = ["git", "iteration", "python"]
+timeout_secs = 180
+
+# ── Step 1: Clean up any prior run inside the container workspace ─────────────
+[[steps]]
+type    = "run_command"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME rm -rf /workspace/eval-repo 2>/dev/null || true"
+
+# ── Step 2: Scaffold the project ─────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I need a Python command-line calculator project in my workspace with version control.
+It should support adding and subtracting two numbers passed as arguments, and include a README that explains how to use it.
+"""
+
+# ── Step 3: Assert scaffold completed ────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 3 -name \"*.py\" | grep -q .'"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 3 -name \"README.md\" | grep -q .'"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 4 -name \".git\" -type d | grep -q .'"
+
+# ── Step 4: Iterate — add features ───────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+The calculator is missing multiply and divide. Can you add those? Also make sure dividing by zero is handled gracefully instead of crashing. Update the README to cover all four operations.
+"""
+
+# ── Step 5: Assert iteration completed ───────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 4 -name \".git\" -type d | xargs -I{} dirname {} | xargs -I{} git -C {} log --oneline 2>/dev/null | wc -l | awk \"{if(\\$1>=2) exit 0; else exit 1}\"'"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 3 -name \"*.py\" | xargs grep -l divide 2>/dev/null | grep -q .'"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'find /workspace -maxdepth 3 -name \"README.md\" | xargs grep -li multiply 2>/dev/null | grep -q .'"
+
+# ── Step 6: Cleanup ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c 'rm -rf /workspace/eval-repo /workspace/calculator /workspace/calc 2>/dev/null'; true"
+
+# ── Rubric ───────────────────────────────────────────────────────────────────
+[rubric]
+[[rubric.criteria]]
+name        = "repo_initialized"
+description = "A git repository was created in the workspace with at least one commit"
+weight      = 25
+
+[[rubric.criteria]]
+name        = "project_structure"
+description = "A Python calculator script and a README exist covering add and subtract"
+weight      = 20
+
+[[rubric.criteria]]
+name        = "feature_extension"
+description = "Multiply and divide were added with graceful divide-by-zero handling; README updated for all four operations"
+weight      = 30
+
+[[rubric.criteria]]
+name        = "commit_discipline"
+description = "At least two commits with meaningful messages; no junk files committed"
+weight      = 25

@@ -1,0 +1,70 @@
+[package]
+name = "that-tools"
+description = "Typed tool engine with policy-governed dispatch for autonomous agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace-managed dependencies
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+
+# Crate-specific dependencies
+figment = { version = "0.10", features = ["toml", "env"] }
+schemars = "0.8"
+tiktoken-rs = "0.6"
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-json = "0.24"
+ignore = "0.4"
+memmap2 = "0.9"
+regex = "1"
+globset = "0.4"
+rayon = "1"
+libc = "0.2"
+similar = "2"
+diffy = "0.4"
+git2 = { version = "0.20", features = ["vendored-libgit2"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+petgraph = "0.8"
+sha2 = "0.10"
+streaming-iterator = "0.1"
+dialoguer = "0.11"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+moka = { version = "0.12", features = ["sync"] }
+scraper = "0.25"
+url = "2"
+base64 = "0.22"
+jsonrpsee = { version = "0.24", features = ["server"], optional = true }
+
+[features]
+default = []
+daemon = ["jsonrpsee"]
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+pretty_assertions = "1"
+tiktoken-rs = "0.6"
+rusqlite = { version = "0.34", features = ["bundled"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false

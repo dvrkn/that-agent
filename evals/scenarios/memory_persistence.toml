@@ -1,0 +1,112 @@
+name        = "Memory Persistence Across Sessions"
+description = """
+Tests whether the agent autonomously stores contextual information in persistent memory
+and correctly retrieves it in a fresh session with no conversation history.
+The agent is never told which tools to use — it must decide on its own whether and
+how to persist facts across the session boundary.
+"""
+agent_name   = "default"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+max_turns    = 20
+sandbox      = false
+tags         = ["memory", "persistence", "autonomy", "long-lived"]
+timeout_secs = 150
+
+# ── Pre-cleanup: remove any eval-tagged memories from a prior run ──────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-persist%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Session A: share contextual facts — do NOT ask the agent to remember them ──
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Quick update on where things stand with our infrastructure project:
+
+- The service is called "helios-api"
+- It runs on Node.js 20 with an Express framework
+- Primary data store is Redis for sessions, PostgreSQL 16 for persistent records
+- Deployed via Fly.io in the Frankfurt region
+- We have a strict rule: never use `any` types in TypeScript, even temporarily
+
+I'm stepping away for the rest of the day. We'll pick this back up tomorrow.
+"""
+
+# ── Assert: agent chose to store something in memory autonomously ──────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE lower(content) LIKE '%helios%' AND created_at > datetime('now', '-5 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Session boundary: clear in-memory conversation history ─────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Session A (fresh start): ask about the project — no hints given ────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "What do we know about the infrastructure project? I want to pick up where we left off."
+
+# ── Assert: the key facts are surfaced from memory (not hallucinated) ──────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE lower(content) LIKE '%helios%'" | grep -qE '^[1-9]'
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE lower(content) LIKE '%helios-api%' OR lower(content) LIKE '%helios api%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "autonomous_storage"
+description = """
+Agent decided on its own to call mem_add (or equivalent) when receiving project context,
+without being told to do so. High score: agent stores facts unprompted. Low score: agent
+only acknowledges the information conversationally with no memory tool call.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "cross_session_recall"
+description = """
+In the fresh session (no conversation history), the agent invoked mem_recall or mem_search
+before answering rather than hallucinating or saying it has no prior context. The response
+should attribute the information to retrieved memory.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "factual_accuracy"
+description = """
+The recalled answer correctly surfaces specific details from session A (service name,
+runtime, data stores, region, TypeScript constraint) without fabricating extra facts.
+"""
+weight = 30

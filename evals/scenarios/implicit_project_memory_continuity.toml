@@ -1,0 +1,162 @@
+name        = "Implicit Project Memory Continuity — Hook-Verified Recall"
+description = """
+Evaluates whether the agent autonomously memorizes project context and later recalls it
+across a session boundary without being told to use memory tools.
+
+This scenario verifies both outcomes and mechanism:
+- Outcome: recalled project facts are correct in a fresh session.
+- Mechanism: hook transcript shows `mem_add` and `mem_recall` were actually called.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 25
+sandbox         = true
+tags            = ["memory", "continuity", "hooks", "llm-judge", "implicit"]
+timeout_secs    = 240
+
+# ── Pre-cleanup / bootstrap ───────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval/plugins"
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE lower(content) LIKE '%orion-cart-eval-2026%'" 2>/dev/null
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/orion-project-summary.json 2>/dev/null || true
+true
+"""
+
+# ── Session A: user provides project context naturally ────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Quick context so we can continue this project later:
+
+- Project id: orion-cart-eval-2026
+- Service: orion-cart-api
+- Runtime: Node.js 20 with Fastify
+- Database: PostgreSQL 16
+- Region: us-east-1
+- Team rule: never use TypeScript `any`
+"""
+
+# Verify mechanism: agent stored memory without being asked.
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_add"
+min_count = 1
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Fresh session: user asks to continue without repeating facts ──────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Let's continue the cart project.
+Create `/tmp/orion-project-summary.json` with keys:
+project, service, runtime, database, region, ts_rule.
+"""
+
+# Verify mechanism: agent recalled memory in fresh session.
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 1
+
+# Verify outcome correctness.
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/orion-project-summary.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/orion-project-summary.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+import json
+d = json.load(open('/tmp/orion-project-summary.json'))
+assert d.get('project') == 'orion-cart-eval-2026', d
+assert d.get('service') == 'orion-cart-api', d
+assert d.get('runtime') == 'Node.js 20 with Fastify', d
+assert d.get('database') == 'PostgreSQL 16', d
+assert d.get('region') == 'us-east-1', d
+assert 'TypeScript' in str(d.get('ts_rule', '')), d
+assert 'any' in str(d.get('ts_rule', '')).lower(), d
+PY
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE lower(content) LIKE '%orion-cart-eval-2026%'" 2>/dev/null
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/orion-project-summary.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "autonomous_memory_storage"
+description = """
+Agent stored user-provided project context in memory without being explicitly asked to.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "hook_verified_recall"
+description = """
+After reset, transcript hook evidence shows `mem_recall` before producing the summary,
+demonstrating real retrieval rather than guessing.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "recalled_fact_accuracy"
+description = """
+Summary values match previously supplied project facts without omissions or hallucinations.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "implicit_self_awareness"
+description = """
+Agent behaved as a long-lived autonomous system: no need for user reminders about memory
+tools, and no unnecessary clarification loops.
+"""
+weight = 20

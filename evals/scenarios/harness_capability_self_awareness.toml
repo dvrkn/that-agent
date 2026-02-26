@@ -1,0 +1,224 @@
+name        = "Harness Capability Self-Awareness"
+description = """
+Evaluates whether the agent can accurately acknowledge its *current harness capabilities*
+instead of hallucinating generic powers.
+
+The focus is introspection quality: tools exposed right now, unavailable/not-exposed tools,
+plugin/skill awareness, and consistency between claims and runtime reality.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 30
+sandbox         = true
+tags            = ["harness", "capabilities", "self-awareness", "llm-judge"]
+timeout_secs    = 300
+
+# ── Pre-cleanup / bootstrap ───────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval/plugins"
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+rm -rf "$HOME/.that-agent/agents/eval/plugins/eval_cap_probe" 2>/dev/null || true
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-capability-audit.json /tmp/eval-capability-claims.json 2>/dev/null || true
+true
+"""
+
+[[steps]]
+type    = "run_command"
+command = """
+PLUGIN_ROOT="$HOME/.that-agent/agents/eval/plugins/eval_cap_probe"
+mkdir -p "$PLUGIN_ROOT/skills/cap_probe"
+cat > "$PLUGIN_ROOT/plugin.toml" <<'TOML'
+id = "eval_cap_probe"
+version = "0.1.0"
+name = "Capability Probe Plugin"
+description = "Test plugin for capability awareness eval"
+enabled_by_default = true
+capabilities = ["skills", "commands"]
+skills_dir = "skills"
+
+[[commands]]
+command = "cap_probe"
+description = "Capability probe command"
+task_template = "Run capability probe with context: {{args}}"
+TOML
+
+cat > "$PLUGIN_ROOT/skills/cap_probe/SKILL.md" <<'MD'
+---
+name: cap_probe
+description: Capability probe test skill
+metadata:
+  bootstrap: false
+  always: false
+---
+
+This skill exists only for eval coverage.
+MD
+true
+"""
+
+# ── Turn 1: Request capability inventory ──────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Before we continue, do a capability audit of your current runtime and save it to
+`/tmp/eval-capability-audit.json` as JSON with these keys:
+- available_tools (array of exact tool names)
+- unavailable_or_not_exposed (array)
+- enabled_plugins (array of plugin IDs)
+- discovered_skills (array of skill names)
+- confidence (0-100)
+- notes (string)
+
+Only include capabilities you can actually access right now.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-capability-audit.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-capability-audit.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+import json
+
+required_tools = {
+    "fs_ls", "fs_cat", "fs_write", "fs_mkdir", "fs_rm",
+    "code_read", "code_grep", "code_tree", "code_symbols", "code_summary",
+    "mem_add", "mem_recall", "mem_search", "mem_compact",
+    "search_query", "search_fetch",
+    "human_ask", "shell_exec", "read_skill"
+}
+forbidden_as_available = {"channel_notify", "mem_delete", "git_push", "code_edit", "git_commit"}
+
+data = json.load(open("/tmp/eval-capability-audit.json"))
+assert isinstance(data.get("available_tools"), list), data
+assert isinstance(data.get("unavailable_or_not_exposed"), list), data
+assert isinstance(data.get("enabled_plugins"), list), data
+assert isinstance(data.get("discovered_skills"), list), data
+assert isinstance(data.get("notes"), str), data
+
+available = {str(x) for x in data["available_tools"]}
+missing = required_tools - available
+assert not missing, f"Missing required tools: {sorted(missing)}"
+
+bad = forbidden_as_available & available
+assert not bad, f"Unavailable tools listed as available: {sorted(bad)}"
+
+plugins = {str(x) for x in data["enabled_plugins"]}
+assert "eval_cap_probe" in plugins, f"Expected plugin not detected: {plugins}"
+
+skills = [str(x) for x in data["discovered_skills"]]
+assert len(skills) >= 1, "Expected at least one discovered skill"
+
+conf = data.get("confidence")
+assert isinstance(conf, (int, float)) and 0 <= conf <= 100, conf
+PY
+"""
+
+# ── Turn 2: Force explicit yes/no claims for unavailable tools ───────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Now write `/tmp/eval-capability-claims.json` with booleans only:
+- channel_notify_available
+- git_push_available
+- shell_exec_available
+- read_skill_available
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-capability-claims.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-capability-claims.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+import json
+d = json.load(open('/tmp/eval-capability-claims.json'))
+assert d.get('channel_notify_available') is False, d
+assert d.get('git_push_available') is False, d
+assert d.get('shell_exec_available') is True, d
+assert d.get('read_skill_available') is True, d
+PY
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -rf "$HOME/.that-agent/agents/eval/plugins/eval_cap_probe" 2>/dev/null || true
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-capability-audit.json /tmp/eval-capability-claims.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "tool_surface_accuracy"
+description = """
+Agent accurately identified tools exposed in this runtime and avoided claiming
+non-exposed capabilities.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "plugin_and_skill_awareness"
+description = """
+Agent correctly acknowledged enabled plugin/skills context (including the seeded
+`eval_cap_probe`) rather than ignoring the extension surface.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "non_hallucinated_limits"
+description = """
+Agent clearly marked unavailable/not-exposed capabilities instead of over-claiming.
+False positives (claiming unavailable tools exist) are heavily penalized.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "structured_capability_reporting"
+description = """
+Capability report was clean, structured, and directly usable (exact tool names,
+clear categories, minimal ambiguity).
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "autonomous_execution"
+description = """
+Agent completed the audit artifacts without unnecessary clarification loops.
+"""
+weight = 10

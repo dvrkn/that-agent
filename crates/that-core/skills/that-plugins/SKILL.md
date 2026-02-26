@@ -1,0 +1,202 @@
+---
+name: that-plugins
+description: Build practical agent plugins (commands, skills, routines, activations, emojis), install them, and verify hot-reload behavior.
+triggers:
+  - plugin
+  - plugins
+  - build plugin
+  - create plugin
+  - activate plugin
+  - routine
+  - activation
+  - emoji pack
+metadata:
+  bootstrap: true
+  always: false
+  version: 1.2.2
+---
+
+# that-plugins
+
+Use this skill when the user asks for plugin work: create, update, install, enable, disable, or debug plugins.
+
+## Scope Rules (Separation of Concerns)
+
+A plugin is always agent-scoped and isolated to:
+- `~/.that-agent/agents/<agent-name>/plugins/<plugin-id>/`
+
+Do not mix concerns:
+- Plugin assets stay in that plugin directory.
+- Agent-level skills stay in `~/.that-agent/agents/<agent-name>/skills/`.
+- Do not write across plugin directories unless user explicitly asks.
+
+## Plugin Directory Contract
+
+`that plugin create` now scaffolds:
+- `plugin.toml`
+- `skills/`
+- `scripts/` (includes `run.sh`)
+- `deploy/` (includes `docker-compose.yml` and `k8s/kustomization.yaml`)
+- `state/`
+- `artifacts/`
+- `Dockerfile`
+
+Runtime-managed state files under plugins root:
+- `.plugin-state.toml`
+- `.plugin-runtime.toml`
+
+## Runtime Backends
+
+Supported backend modes:
+- `docker` (default runtime path; can deploy/run via Docker socket on local/VPS hosts)
+- `kubernetes` (build/push/deploy orchestration path in clusters)
+- Agent runtime should be self-aware of active backend from preamble/system-reminder metadata.
+
+Backend execution defaults:
+- Docker mode + socket enabled: agent can spawn sibling containers/compose stacks via host Docker socket.
+- Docker mode + socket disabled: agent can still run inside sandbox container but should not claim host Docker orchestration.
+- Kubernetes mode: agent should read `image_build_backend` from `<system-reminder>` and follow it strictly.
+  - `buildkit`: build/push with `buildctl` via `${BUILDKIT_HOST}`.
+  - `docker`: build/push with Docker only if daemon is actually available.
+  - `none`: require prebuilt image or run a Kubernetes-native build job.
+
+When user asks to "run/deploy service":
+- Prefer Docker/Kubernetes-native deploy flow first (based on active backend).
+- If user says "run it in Docker", execute Docker commands and return container name + published port(s).
+- In Kubernetes mode with `image_build_backend=buildkit`, do not ask for Docker socket access and do not claim Docker is required.
+- Do not default to `python3 -m http.server` unless user explicitly wants a temporary static preview.
+
+Plugin manifest can declare runtime/deploy blocks:
+
+```toml
+[runtime]
+kind = "docker"               # docker | kubernetes
+context = "."
+dockerfile = "Dockerfile"
+command = ["/bin/sh", "scripts/run.sh"]
+
+[deploy]
+target = "docker"             # docker | kubernetes
+kind = "service"              # docker: service|job, kubernetes: deployment|statefulset|job
+compose_file = "deploy/docker-compose.yml"
+kustomize_dir = "deploy/k8s"
+replicas = 1
+```
+
+## Minimal plugin.toml Template
+
+```toml
+id = "example_plugin"
+version = "0.1.0"
+name = "Example Plugin"
+description = "Adds plugin-powered workflows"
+enabled_by_default = true
+capabilities = ["skills", "commands", "routines", "activations", "emojis"]
+envvars = [] # Optional required env vars, e.g. ["${SERVICE_API_URL}", "${SERVICE_API_TOKEN}"]
+skills_dir = "skills"
+
+[runtime]
+kind = "docker"
+context = "."
+dockerfile = "Dockerfile"
+command = ["/bin/sh", "scripts/run.sh"]
+
+[deploy]
+target = "docker"
+kind = "service"
+compose_file = "deploy/docker-compose.yml"
+kustomize_dir = "deploy/k8s"
+replicas = 1
+
+[[commands]]
+command = "example_cmd"
+description = "Execute plugin example flow"
+task_template = "Run plugin flow with context: {{args}}"
+
+[[routines]]
+name = "daily_review"
+schedule = "daily"
+priority = "normal"
+task_template = "Run daily plugin review"
+```
+
+## Skill Authoring Paths
+
+Plugin-scoped skill path:
+- `~/.that-agent/agents/<agent-name>/plugins/<plugin-id>/skills/<skill-name>/SKILL.md`
+
+Agent-scoped skill path:
+- `~/.that-agent/agents/<agent-name>/skills/<skill-name>/SKILL.md`
+
+Use explicit CLI scope:
+- Plugin-scoped skill: `that --agent <agent-name> skill create <skill-name> --plugin <plugin-id>`
+- Agent-scoped skill: `that --agent <agent-name> skill create <skill-name>`
+
+## Runtime Behavior
+
+- `commands` become slash commands in channel integrations.
+- `skills` are discoverable by `read_skill` and the skill catalog.
+- `routines` run through heartbeat scheduling.
+  Routine schedule supports `once|minutely|hourly|daily|weekly` and cron (`cron: */5 * * * *`).
+- `activations` enqueue heartbeat tasks when inbound events match.
+- `emojis` are exposed in plugin context for channel formatting.
+- `envvars` declares required environment variables for the plugin runtime.
+- `read_plugin` can inspect plugin manifest/state before changes.
+- `validate_plugin` can verify manifest integrity and missing env vars.
+- Deploy is not Kubernetes-only: in Docker mode, deploy can mean creating/running Docker containers or compose stacks via socket access.
+
+## Kubernetes Hygiene (Required)
+
+When deploying plugin workloads to Kubernetes:
+- Reuse the same Deployment/Service names for updates; do not generate new random resource names per attempt.
+- Keep `replicas = 1` by default for interactive plugin services (browser/CLI helpers) unless the user asks to scale out.
+- Always label resources consistently (for example `app.kubernetes.io/name=<plugin-id>`), then use those labels for rollout checks and cleanup.
+- If rollout fails, debug first (`kubectl describe`, `kubectl logs`, `kubectl get events`) and only re-apply after fixing the cause.
+- Remove stale failed/evicted pods for the plugin label after successful recovery so the namespace stays clean.
+
+## Enable / Disable
+
+Preferred CLI actions:
+- `that --agent <agent-name> plugin enable <plugin-id>`
+- `that --agent <agent-name> plugin disable <plugin-id>`
+
+Disable semantics:
+- Disable means runtime-off, not file deletion.
+- After disable, verify both:
+  - plugin is marked disabled in state/list output
+  - plugin directory/files still exist on disk
+- In status/output text, state explicitly: "disabled, files retained".
+
+## Validation Checklist
+
+After changes, verify all:
+1. `plugin.toml` parses correctly.
+2. Command names are lowercase and safe.
+3. Skill files are created in the intended scope (agent vs plugin).
+4. Plugin appears in `plugin list`.
+5. Plugin command appears in `/help` when listening.
+6. Routine/activation behavior is observable in heartbeat runs.
+7. Plugin files remain inside plugin-owned directories.
+8. Disable behavior is correct: plugin disabled in state and files retained.
+9. Durable plugin facts are stored via `mem_add` (plugin id, purpose, commands/skills/routines touched, deploy/runtime notes).
+10. For Kubernetes deploys: no stale failed/evicted pods remain for this plugin label after rollout.
+
+## Practical Constraints
+
+- Keep commands specific and task templates deterministic.
+- Prefer one plugin per domain (e.g. `crypto_trader`, `customer_ops`).
+- Avoid giant multi-purpose plugins.
+- If editing existing plugins, preserve backward-compatible command names.
+
+## Done Criteria
+
+A plugin task is done only when:
+- files are written in the correct scope,
+- plugin is enabled (or explicitly disabled by request),
+- runtime reload/behavior was verified,
+- and the final plugin outcome was persisted with `mem_add`.
+
+For create/update flows, persist memory at the end:
+- Call `mem_add` with a concise summary of what changed and what to reuse later.
+- Include tags like `plugin`, `<plugin-id>`, and domain tags (for example `deploy`, `skills`, `routine`).
+- Prefer session-scoped memory when this is tied to a specific active session.

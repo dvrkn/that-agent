@@ -1,0 +1,209 @@
+name        = "Plugin Reuse + Update Across Turns"
+description = """
+Evaluates whether the agent can:
+1) create a plugin with a concrete output contract,
+2) reuse that plugin behavior in a later turn,
+3) update the plugin contract in another turn,
+4) apply the updated contract after a session reset.
+
+This scenario is judge-heavy: deterministic assertions verify artifacts, while the
+LLM judge scores adaptation quality, update discipline, and evidence consistency.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 40
+sandbox         = true
+tags            = ["plugins", "reuse", "update", "cross-session", "llm-judge"]
+timeout_secs    = 300
+
+# ── Pre-cleanup / bootstrap ───────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+AGENT="{{agent_name}}"
+PLUGIN_ID="eval_contract_plugin"
+PLUGIN_DIR="$HOME/.that-agent/agents/$AGENT/plugins/$PLUGIN_ID"
+STATE="$HOME/.that-agent/agents/$AGENT/plugins/.plugin-state.toml"
+
+rm -rf "$PLUGIN_DIR" 2>/dev/null || true
+mkdir -p "$HOME/.that-agent/agents/$AGENT/plugins"
+
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_contract_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-plugin-v1.json /tmp/eval-plugin-v2.json 2>/dev/null || true
+true
+"""
+
+# ── Turn 1: Create plugin v1 contract ─────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Create a plugin for yourself named `eval_contract_plugin` that standardizes service
+snapshot JSON output.
+
+Version 1 contract:
+- plugin_marker = EVAL_PLUGIN_UPDATE_V1
+- schema_version = 1
+- service
+- status
+
+Please make it immediately usable.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/{{agent_name}}/plugins/eval_contract_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/{{agent_name}}/plugins/eval_contract_plugin -name SKILL.md -type f | grep -q ."
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/{{agent_name}}/plugins/eval_contract_plugin -name SKILL.md -type f -print0 | xargs -0 grep -q 'EVAL_PLUGIN_UPDATE_V1'"
+
+# ── Turn 2: Reuse v1 behavior ─────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Generate a snapshot for service `checkout-api` with status `ok` and write it to
+`/tmp/eval-plugin-v1.json`.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-plugin-v1.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-plugin-v1.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -c \"import json; d=json.load(open('/tmp/eval-plugin-v1.json')); assert d.get('plugin_marker')=='EVAL_PLUGIN_UPDATE_V1', d; assert d.get('schema_version')==1, d; assert d.get('service')=='checkout-api', d; assert d.get('status')=='ok', d\""
+
+# ── Turn 3: Update plugin to v2 contract ──────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Update `eval_contract_plugin` to version 2 of the contract.
+
+New contract:
+- plugin_marker = EVAL_PLUGIN_UPDATE_V2
+- schema_version = 2
+- service
+- status
+- environment
+
+Keep it ready for immediate use after the update.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/{{agent_name}}/plugins/eval_contract_plugin -name SKILL.md -type f -print0 | xargs -0 grep -q 'EVAL_PLUGIN_UPDATE_V2'"
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 4: Verify updated behavior in fresh session ──────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Now generate a snapshot for `payments-api` with status `degraded` in environment
+`staging`, and write it to `/tmp/eval-plugin-v2.json`.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-plugin-v2.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-plugin-v2.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -c \"import json; d=json.load(open('/tmp/eval-plugin-v2.json')); assert d.get('plugin_marker')=='EVAL_PLUGIN_UPDATE_V2', d; assert d.get('schema_version')==2, d; assert d.get('service')=='payments-api', d; assert d.get('status')=='degraded', d; assert d.get('environment')=='staging', d\""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+AGENT="{{agent_name}}"
+PLUGIN_ID="eval_contract_plugin"
+PLUGIN_DIR="$HOME/.that-agent/agents/$AGENT/plugins/$PLUGIN_ID"
+STATE="$HOME/.that-agent/agents/$AGENT/plugins/.plugin-state.toml"
+
+rm -rf "$PLUGIN_DIR" 2>/dev/null || true
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_contract_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-plugin-v1.json /tmp/eval-plugin-v2.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "plugin_creation_and_structure"
+description = """
+Agent created a coherent plugin structure and implemented v1 contract behavior without
+requiring low-level hand-holding.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "reusability_before_update"
+description = """
+Agent reused the plugin behavior correctly in a later turn (v1 output contract is
+applied consistently).
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "update_execution_quality"
+description = """
+Agent updated the plugin itself (not just one-off output) to v2 with clear contract
+changes and no confusion between old and new requirements.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "cross_session_updated_behavior"
+description = """
+After session reset, agent applied the updated v2 contract in fresh context.
+Penalize fallback to v1 behavior.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "evidence_consistency_and_verification"
+description = """
+Assistant claims remain consistent with tool evidence and artifacts; key outcomes are
+verified rather than asserted without checks.
+"""
+weight = 15

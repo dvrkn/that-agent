@@ -1,0 +1,204 @@
+name        = "Plugin Lifecycle Across Session Boundary"
+description = """
+Tests whether the agent can create a plugin, apply its skill after a session reset,
+and then disable the plugin without deleting it.
+
+This scenario is designed to catch shallow success claims by requiring concrete side
+effects at each stage:
+1) plugin files are created correctly,
+2) plugin-constrained JSON output appears in a fresh session,
+3) plugin is effectively disabled while files remain on disk.
+"""
+agent_name   = "eval"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+judge_provider = "openai"
+judge_model    = "gpt-5.2-codex"
+max_turns    = 30
+sandbox      = true
+tags         = ["plugins", "lifecycle", "cross-session", "autonomy"]
+timeout_secs = 300
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "rm -rf ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin 2>/dev/null; true"
+
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval/plugins"
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_snapshot_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-health-snapshot.json 2>/dev/null || true
+true
+"""
+
+# ── Turn 1: Create plugin + skill ─────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Can you create a new plugin for yourself called `eval_snapshot_plugin`?
+I want it to standardize health snapshot JSON output with these fields:
+- plugin_marker = EVAL_PLUGIN_LIFECYCLE_V1
+- service
+- status
+- checked_at_utc
+
+Please make it ready to use immediately once created.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q 'id = \"eval_snapshot_plugin\"' ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin -name SKILL.md -type f | grep -q ."
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin -name SKILL.md -type f -print0 | xargs -0 grep -q 'EVAL_PLUGIN_LIFECYCLE_V1'"
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 2: Reuse behavior after reset (no reminder of marker) ───────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I need a health snapshot for `checkout-api` with status `ok`.
+Please save it to `/tmp/eval-health-snapshot.json`.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-health-snapshot.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-health-snapshot.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -c \"import json; d=json.load(open('/tmp/eval-health-snapshot.json')); assert d.get('plugin_marker')=='EVAL_PLUGIN_LIFECYCLE_V1', d; assert d.get('service')=='checkout-api', d; assert d.get('status')=='ok', d; assert 'checked_at_utc' in d, d\""
+
+# ── Turn 3: Disable plugin but keep files ─────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "Disable plugin `eval_snapshot_plugin` but keep all plugin files on disk."
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -d ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+plugin_id = "eval_snapshot_plugin"
+manifest_path = Path.home() / ".that-agent/agents/eval/plugins" / plugin_id / "plugin.toml"
+state_path = Path.home() / ".that-agent/agents/eval/plugins/.plugin-state.toml"
+
+manifest = tomllib.loads(manifest_path.read_text())
+enabled = bool(manifest.get("enabled_by_default", True))
+
+if state_path.exists() and state_path.read_text().strip():
+    state = tomllib.loads(state_path.read_text())
+    enabled = bool(
+        state.get("plugins", {})
+             .get(plugin_id, {})
+             .get("enabled", enabled)
+    )
+
+assert enabled is False, f"Plugin still enabled (effective={enabled})"
+PY
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -rf ~/.that-agent/agents/eval/plugins/eval_snapshot_plugin 2>/dev/null
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.eval_snapshot_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-health-snapshot.json 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "plugin_creation_quality"
+description = """
+Agent created a valid plugin structure (`plugin.toml` + skill file) with the required
+marker rule, and left it enabled for use.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "cross_session_plugin_application"
+description = """
+After `reset_session`, agent applied plugin-defined behavior to the health snapshot
+task (marker + required fields) without being re-told the marker value. High score if
+transcript shows explicit skill retrieval/use (`read_skill`) in the fresh session.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "disable_without_deletion"
+description = """
+When asked to disable the plugin, agent changed effective enablement to false while
+preserving plugin files on disk.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "verification_discipline"
+description = """
+Agent verified key outcomes (plugin files, JSON correctness, disable state) instead of
+only claiming completion.
+"""
+weight = 10

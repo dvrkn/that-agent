@@ -1,0 +1,216 @@
+name        = "Workspace Bootstrap — Soul and Identity Creation"
+description = """
+Verifies the new workspace file model end-to-end: a fresh agent (no Soul.md or Identity.md)
+runs the bootstrap ritual through natural conversation and correctly produces the separate
+Soul.md (deep character) and Identity.md (shallow name/vibe) files, then removes Bootstrap.md
+to signal completion.
+
+A high-scoring run produces distinct, non-template content in both files and deletes Bootstrap.md.
+A low-scoring run leaves files as placeholders or skips the ritual entirely.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 40
+sandbox         = true
+tags            = ["bootstrap", "workspace", "identity", "soul", "llm-judge"]
+timeout_secs    = 300
+
+# ── Agent config bootstrap ─────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+true
+"""
+
+# ── Pre-cleanup: remove all workspace identity files so agent starts fresh ─────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME sh -c '
+  rm -f /home/agent/.that-agent/agents/eval/Soul.md
+  rm -f /home/agent/.that-agent/agents/eval/Identity.md
+  rm -f /home/agent/.that-agent/agents/eval/User.md
+  rm -f /home/agent/.that-agent/agents/eval/Memory.md
+  rm -f /home/agent/.that-agent/agents/eval/Bootstrap.md
+' 2>/dev/null || true
+true
+"""
+
+# ── Plant Bootstrap.md in the container to trigger the ritual ─────────────────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec -i $THAT_EVAL_CONTAINER_NAME sh -c '
+  mkdir -p /home/agent/.that-agent/agents/eval
+  cat > /home/agent/.that-agent/agents/eval/Bootstrap.md
+' <<'MD'
+## First Run
+
+This is your bootstrap moment. You and your user figure out who you are together.
+Don't interrogate. Don't be robotic. Just talk.
+
+**Steps:**
+1. Greet your user naturally. Ask who they are and what they're hoping for.
+2. Figure out your name and character through conversation — not a form.
+3. Once you have a sense of who you are and who you're talking to, write:
+   - Identity.md — your name, what you are, your vibe, your emoji
+   - Soul.md — your character, worldview, values, how you move through the world
+   - User.md — who this person is, how they communicate, what they care about
+4. Delete this file when the ritual is complete.
+   Its absence signals you've moved from script to authentic presence.
+
+Keep it human. The goal is a real relationship, not a configuration exercise.
+MD
+true
+"""
+
+# ── Assert: Bootstrap.md was planted ──────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /home/agent/.that-agent/agents/eval/Bootstrap.md"
+
+# ── Turn 1: natural first-contact greeting (no tool names, no file references) ─
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Hi there! This is our first time working together and I'm genuinely excited. I'd love to get to know you — who are you, and what should I call you? Feel free to make yourself at home here.
+"""
+
+# ── Turn 2: prompt to complete the ritual ─────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+That's a great start. Go ahead and make it official — lock in your identity and wrap up the setup. I want your character properly established before we dive into real work.
+"""
+
+# ── Assert: Soul.md was created in the container ──────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /home/agent/.that-agent/agents/eval/Soul.md"
+
+# ── Assert: Identity.md was created in the container ─────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /home/agent/.that-agent/agents/eval/Identity.md"
+
+# ── Assert: Bootstrap.md was deleted (ritual completed) ───────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c '! test -f /home/agent/.that-agent/agents/eval/Bootstrap.md'"
+
+# ── Assert: Soul.md has real content — not just template placeholders ─────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+content = open('/home/agent/.that-agent/agents/eval/Soul.md').read()
+# Must have a Character section with real text, not just a blank placeholder
+assert '## Character' in content, "Soul.md missing Character section"
+assert len(content.strip()) > 200, f"Soul.md too short to be real: {len(content)} chars"
+# Reject if it's just the blank template (placeholders start with "(")
+lines_with_content = [l for l in content.splitlines() if l.strip() and not l.strip().startswith('(') and not l.strip().startswith('#')]
+assert len(lines_with_content) >= 3, "Soul.md appears to be unfilled template"
+PY
+"""
+
+# ── Assert: Identity.md has a name defined ────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+content = open('/home/agent/.that-agent/agents/eval/Identity.md').read()
+assert '## Name' in content or '## What I Am' in content, "Identity.md missing key sections"
+assert len(content.strip()) > 50, f"Identity.md too short: {len(content)} chars"
+PY
+"""
+
+# ── Assert: No Inner.md was created (old model must not be used) ──────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME sh -c '! test -f /home/agent/.that-agent/agents/eval/Inner.md'"
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME sh -c '
+  rm -f /home/agent/.that-agent/agents/eval/Soul.md
+  rm -f /home/agent/.that-agent/agents/eval/Identity.md
+  rm -f /home/agent/.that-agent/agents/eval/User.md
+  rm -f /home/agent/.that-agent/agents/eval/Memory.md
+  rm -f /home/agent/.that-agent/agents/eval/Bootstrap.md
+' 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "soul_identity_split"
+description = """
+Agent created two separate files: Soul.md with deep character/values content and
+Identity.md with shallow name/vibe content. A high score means the split is semantically
+correct — Soul.md has worldview/philosophy, Identity.md has name/emoji/vibe.
+Low score: agent wrote everything into one file, wrote only one file, or left both as templates.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "bootstrap_completion"
+description = """
+Agent deleted Bootstrap.md after completing the ritual, demonstrating it understood
+the ephemeral lifecycle of the bootstrap file. High score: Bootstrap.md gone, both
+workspace identity files created. Low score: Bootstrap.md still exists, or files not created.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "character_authenticity"
+description = """
+Soul.md content reflects a real, distinct character — specific traits, worldview,
+and behavioral philosophy that are not generic LLM filler. The agent invented
+a coherent identity rather than copying template placeholders verbatim.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "conversational_naturalness"
+description = """
+The agent engaged naturally in the bootstrap conversation before creating files —
+it didn't immediately dump a configuration form or interrogate the user robotically.
+"""
+weight = 15

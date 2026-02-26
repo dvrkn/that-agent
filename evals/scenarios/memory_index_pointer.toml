@@ -1,0 +1,230 @@
+name        = "Memory Index Pointer — Thin Memory.md After Compaction"
+description = """
+Verifies that after accumulating fragmented notes and compacting them, the agent
+writes a thin Memory.md navigation index — not a content dump. The index must contain
+the pointer structure (date, topic, recall query per compaction row) so future sessions
+can orient without fetching the full SQLite store.
+
+A high-scoring run produces a Memory.md with a table of pointers, active topic tags,
+and no raw memory content pasted in. A low-scoring run pastes all memory content into
+the file, skips the file entirely, or produces a file so large it would bloat the preamble.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 30
+sandbox         = true
+tags            = ["memory", "compaction", "memory-index", "thin-index", "llm-judge"]
+timeout_secs    = 240
+
+# ── Agent config bootstrap ─────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+true
+"""
+
+# ── Pre-cleanup: remove Memory.md from container and eval-tagged DB entries ────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /home/agent/.that-agent/agents/eval/Memory.md 2>/dev/null || true
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-memidx%' OR (source='compaction' AND lower(content) LIKE '%vertex-relay%')" 2>/dev/null
+fi
+true
+"""
+
+# ── Inject: fragmented notes about a project accumulated over several weeks ────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay: Go service, handles WebSocket fan-out to up to 5000 concurrent subscribers per relay instance.', 'eval-memidx,vertex-relay,arch', 'eval', datetime('now', '-30 days'), datetime('now', '-30 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay auth: HMAC-SHA256 signed tokens, 15-minute expiry, renewals via /api/renew endpoint.', 'eval-memidx,vertex-relay,auth', 'eval', datetime('now', '-24 days'), datetime('now', '-24 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay storage: Redis Streams for message buffering, 24-hour retention, eviction on memory pressure.', 'eval-memidx,vertex-relay,storage', 'eval', datetime('now', '-18 days'), datetime('now', '-18 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay k8s: 2 replicas baseline HPA max 12, CPU threshold 65%. Liveness: /healthz. Readiness: /ready.', 'eval-memidx,vertex-relay,infra', 'eval', datetime('now', '-14 days'), datetime('now', '-14 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay bug BRK-291: goroutine leak on subscriber disconnect. Context cancellation ignored in fanout loop.', 'eval-memidx,vertex-relay,bugs', 'eval', datetime('now', '-10 days'), datetime('now', '-10 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay BRK-291 fix: wrapped fanout loop select with ctx.Done() case. Merged PR-1034. Deployed to prod.', 'eval-memidx,vertex-relay,bugs', 'eval', datetime('now', '-5 days'), datetime('now', '-5 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay monitoring: Prometheus metrics on /metrics, Grafana dashboard id 4821. Alert on msg drop rate > 0.5%.', 'eval-memidx,vertex-relay,monitoring', 'eval', datetime('now', '-3 days'), datetime('now', '-3 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'vertex-relay CI: GitHub Actions, 3 jobs: lint+test, build+push to ECR, helm upgrade. Full pipeline 6 minutes.', 'eval-memidx,vertex-relay,ci', 'eval', datetime('now', '-2 days'), datetime('now', '-2 days'))
+" 2>/dev/null
+true
+"""
+
+# ── Assert: injection succeeded ────────────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE tags LIKE '%eval-memidx%'" | grep -qE '^[5-9]|^[1-9][0-9]'
+"""
+
+# ── Prompt: ask agent to organize memory and keep notes tidy ──────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I've been accumulating notes about the vertex-relay project over several weeks and I'd like things properly organized. Can you review what's in memory, consolidate it, and make sure your notes are in a clean state you can quickly navigate in future sessions?
+"""
+
+# ── Assert: agent actually searched/recalled from memory ──────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 1
+
+# ── Assert: agent called mem_compact (not just listed facts) ──────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_compact"
+min_count = 1
+
+# ── Assert: agent wrote a file (Memory.md update) ─────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "fs_write"
+min_count = 1
+
+# ── Assert: Memory.md exists in the container ─────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /home/agent/.that-agent/agents/eval/Memory.md"
+
+# ── Assert: Memory.md has pointer table structure ─────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME grep -q '|' /home/agent/.that-agent/agents/eval/Memory.md"
+
+# ── Assert: Memory.md stays thin — under 4 KB (pointer only, not a content dump) ─
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+import os
+size = os.path.getsize('/home/agent/.that-agent/agents/eval/Memory.md')
+assert size < 4096, f"Memory.md too large ({size} bytes) — agent may have dumped raw content instead of pointers"
+PY
+"""
+
+# ── Assert: Memory.md does not contain verbatim raw memory content ─────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+content = open('/home/agent/.that-agent/agents/eval/Memory.md').read()
+# The raw memory entries are very long and specific — a thin index shouldn't contain
+# the exact verbatim sentences from the store (only recall hints and topic labels)
+raw_snippets = [
+    'HMAC-SHA256 signed tokens, 15-minute expiry',
+    'Redis Streams for message buffering, 24-hour retention',
+    'Context cancellation ignored in fanout loop',
+    '2 replicas baseline HPA max 12, CPU threshold 65%',
+]
+hits = [s for s in raw_snippets if s in content]
+assert len(hits) <= 1, f"Memory.md contains {len(hits)} verbatim raw entries — should be thin pointers only: {hits}"
+PY
+"""
+
+# ── Assert: compaction entry landed in SQLite ──────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE source='compaction' AND lower(content) LIKE '%vertex%' AND created_at > datetime('now', '-10 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /home/agent/.that-agent/agents/eval/Memory.md 2>/dev/null || true
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-memidx%' OR (source='compaction' AND lower(content) LIKE '%vertex-relay%')" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "thin_index_discipline"
+description = """
+Memory.md contains only pointer rows (date, topic, recall query) and a topic tag cloud —
+not the raw content of individual memories. High score: file is compact, table-structured,
+and clearly navigational. Low score: agent pasted full memory content into the file,
+making it a content store rather than an index.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "compaction_executed"
+description = """
+Agent called mem_compact to create a durable pinned SQLite entry from the accumulated notes.
+High score: explicit mem_compact tool call with a coherent synthesis.
+Low score: agent only described what it would compact but made no tool call.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "recall_before_organize"
+description = """
+Agent recalled from memory before forming the organization plan — it did not work from
+imagination. The mem_recall call should precede the compaction.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "recall_query_usefulness"
+description = """
+The recall query in Memory.md's pointer table is specific enough to be useful — a future
+session could execute it and retrieve the relevant compaction summary. Generic queries like
+"vertex relay" score lower than targeted ones like "vertex-relay auth infra deployment".
+"""
+weight = 15

@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/that-tools", "crates/that-channels", "crates/that-core", "crates/that-cli", "crates/that-eval", "crates/that-plugins", "crates/that-sandbox"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ORGNAME/that-agent"
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env", "string"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time", "process"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Observability (OpenTelemetry / Phoenix)
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = "0.32"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Unique IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

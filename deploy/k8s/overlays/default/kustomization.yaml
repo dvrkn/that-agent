@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: that-agent-default
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - secret.yaml
+
+images:
+  - name: that-agent
+    newName: myregistry.localhost:12345/that-agent
+    newTag: v1.0
+
+patches:
+  - path: patch-configmap.yaml

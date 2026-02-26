@@ -1,0 +1,33 @@
+# Build output
+/target/
+**/target/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Cargo lock (keep for binaries, ignore for libs — adjust if needed)
+# Cargo.lock  ← intentionally not ignored (workspace has binaries)
+
+.that-agent/state/
+.that/
+
+# Local task tracking (Claude Code session state)
+tasks/
+
+# Local caches (Docker buildx, etc.)
+.cache/
+
+# Kubernetes overlay secrets (populated per-deployment, never committed)
+deploy/k8s/overlays/*/secret.yaml
+
+# Logs
+*.log

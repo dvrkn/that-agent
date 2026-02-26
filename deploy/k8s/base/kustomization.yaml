@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - role.yaml
+  - rolebinding.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - phoenix-service.yaml
+  - phoenix-deployment.yaml
+  - deployment.yaml
+
+configMapGenerator:
+  - name: that-agent-entrypoint
+    files:
+      - entrypoint.sh=entrypoint.sh
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: that-agent
+      app.kubernetes.io/part-of: that-agent
+    includeSelectors: true
+  - pairs:
+      that-agent/managed: "true"
+    includeSelectors: false

@@ -1,0 +1,138 @@
+name        = "Temporal Recall — Cross-Date Memory Retrieval"
+description = """
+Evaluates whether the agent can surface information planted at different simulated points
+in time (60, 30, and 7 days ago). The recency boost in the BM25 ranking naturally
+de-prioritises older entries; this scenario checks that the agent nonetheless retrieves
+the full chronological picture when asked, and then consolidates it into a pinned
+compaction entry without losing older context.
+
+A second session (after history reset) then tests whether the compaction entry alone is
+sufficient to answer questions about the earliest events — confirming durability of the
+compaction pattern for long-lived agents.
+"""
+agent_name   = "default"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+max_turns    = 20
+sandbox      = false
+tags         = ["memory", "temporal", "recall", "long-lived", "compaction"]
+timeout_secs = 180
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-temporal%' OR (source='compaction' AND lower(content) LIKE '%prism-proj%')" 2>/dev/null
+fi
+true
+"""
+
+# ── Inject: three memory entries at 60 / 30 / 7 days ago ──────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'prism-proj was started to replace the legacy billing engine. Team of 4 engineers. Goal: reduce billing cycle from 4 hours to under 10 minutes.', 'eval-temporal,prism-proj,founding', 'eval', datetime('now', '-60 days'), datetime('now', '-60 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'prism-proj architecture decision: Apache Kafka chosen for event streaming over RabbitMQ and Pulsar. Driver: exactly-once semantics required for billing events.', 'eval-temporal,prism-proj,architecture', 'eval', datetime('now', '-30 days'), datetime('now', '-30 days'));
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'prism-proj first production deployment complete. Billing cycle now runs in 6 minutes. Only open P1: GH-1901 idempotency bug under investigation.', 'eval-temporal,prism-proj,milestone', 'eval', datetime('now', '-7 days'), datetime('now', '-7 days'))
+" 2>/dev/null
+true
+"""
+
+# ── Assert: all three entries were injected ────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE tags LIKE '%eval-temporal%'" | grep -qE '^3$'
+"""
+
+# ── Session A: full history request ───────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "Bring me up to speed on prism-proj from the very beginning. I want the full picture — how it started, what architectural choices were made, and where things stand today."
+
+# ── Session A: compact what was retrieved ─────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "Good. Now please consolidate everything you just recalled about prism-proj into a single authoritative memory note that will serve as the canonical reference going forward."
+
+# ── Assert: compaction entry created with prism content ───────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE source='compaction' AND lower(content) LIKE '%prism%' AND created_at > datetime('now', '-10 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Session A (fresh): ask about the founding context — the oldest entry ───────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "What were the original goals and team setup when prism-proj was first started?"
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-temporal%' OR (source='compaction' AND lower(content) LIKE '%prism-proj%') OR (source='compaction' AND lower(content) LIKE '%prism proj%')" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "full_temporal_coverage"
+description = """
+In session A, the agent retrieved facts from all three time periods: the founding
+context (60 days ago), the architecture decision (30 days ago), and the production
+milestone (7 days ago). Low score if only recent entries appear in the response.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "compaction_created"
+description = """
+Agent called mem_compact to persist a pinned canonical note rather than just reciting
+facts in conversation. The entry must cover founding, architecture choice, and
+current status.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "post_reset_recall"
+description = """
+In the fresh session (after reset), the agent correctly recalled the founding context
+from the compaction entry or original memory — demonstrating that the oldest facts
+survive the session boundary.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "no_hallucination"
+description = """
+Every specific claim in both sessions can be traced to one of the three injected entries.
+Agent did not invent team members, dates, or technical details beyond what was stored.
+"""
+weight = 10
