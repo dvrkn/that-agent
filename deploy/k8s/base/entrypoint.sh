@@ -16,7 +16,9 @@ export PATH="/opt/buildkit/bin:${PATH}"
 
 # ── Agent init (only on first boot with empty PVC) ──────────────────
 AGENT_NAME="${THAT_AGENT_NAME:-default}"
-AGENT_CONFIG="/home/agent/.that-agent/agents/${AGENT_NAME}/config.toml"
+AGENT_DIR="/home/agent/.that-agent/agents/${AGENT_NAME}"
+AGENT_CONFIG="${AGENT_DIR}/config.toml"
+AGENT_IDENTITY="${AGENT_DIR}/Identity.md"
 
 if [ ! -f "${AGENT_CONFIG}" ]; then
   if [ -n "${THAT_AGENT_BOOTSTRAP_PROMPT:-}" ]; then
@@ -24,6 +26,12 @@ if [ ! -f "${AGENT_CONFIG}" ]; then
   else
     that agent init "${AGENT_NAME}"
   fi
+elif [ -n "${THAT_AGENT_BOOTSTRAP_PROMPT:-}" ] && [ ! -f "${AGENT_IDENTITY}" ]; then
+  # config.toml exists but soul generation failed on a previous boot (e.g. no API
+  # credits). Retry generating Soul.md / Identity.md so the agent starts with
+  # an established identity rather than entering self-bootstrap mode.
+  echo "Identity files missing — retrying soul generation for '${AGENT_NAME}'..."
+  that agent init "${AGENT_NAME}" --prompt "${THAT_AGENT_BOOTSTRAP_PROMPT}" --force
 fi
 
 # ── Telegram channel bootstrap ──────────────────────────────────────

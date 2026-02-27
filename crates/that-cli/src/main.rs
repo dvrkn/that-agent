@@ -843,6 +843,10 @@ async fn handle_agent_orchestration_command(cli: &Cli) -> anyhow::Result<()> {
                     shared_workspace,
                 } => {
                     let mut defaults = that_core::config::AgentDef::default();
+                    // Apply env var defaults first (THAT_AGENT_PROVIDER, THAT_AGENT_MODEL,
+                    // THAT_AGENT_MAX_TURNS) so k8s ConfigMap values are picked up when
+                    // no config file exists yet. CLI flags override env vars below.
+                    defaults.apply_env_overrides(None);
                     if let Some(provider) = &cli.provider {
                         defaults.provider = provider.clone();
                     }
