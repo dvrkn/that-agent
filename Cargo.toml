@@ -6,7 +6,7 @@ members = ["crates/that-tools", "crates/that-channels", "crates/that-core", "cra
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/ORGNAME/that-agent"
+repository = "https://github.com/that-labs/that-agent"
 
 [workspace.dependencies]
 # CLI
