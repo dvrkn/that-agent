@@ -11,6 +11,12 @@ pub struct BingProvider {
     client: reqwest::blocking::Client,
 }
 
+impl Default for BingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BingProvider {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()

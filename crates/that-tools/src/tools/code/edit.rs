@@ -193,10 +193,10 @@ fn apply_search_replace(
             });
         }
         // Single replacement (default)
-        return Ok(ComputeResult {
+        Ok(ComputeResult {
             content: original.replacen(search, replace, 1),
             replacements: None,
-        });
+        })
     } else {
         // Try fuzzy: find the closest matching lines with minimum similarity
         let search_lines: Vec<&str> = search.lines().collect();
