@@ -1,0 +1,570 @@
+name        = "Long-Memory Corpus — Six Months of Production Cluster Survival"
+description = """
+Stress-tests recall across a realistic large corpus: 26 memory entries injected at
+staggered timestamps spanning 180 days, simulating what a long-running cluster agent
+accumulates over half a year of production operations.
+
+The corpus covers three full production incidents with lifecycle entries (opened /
+root-cause / resolved), pod names and image SHAs that change across incidents (so the
+agent must distinguish current state from superseded state), implicit deployment
+preferences, team ownership, world-view gotchas, and open watch items.
+
+Five independent sessions each probe a distinct recall dimension:
+
+  Session A — incident timeline reconstruction.
+              Query phrasing deliberately differs from stored phrasing to stress the
+              FTS5 BM25 index across 120-, 55-, and 20-day-old entries.
+              Ends with compaction of the full incident log.
+
+  Session B — exact current-state precision.
+              The agent must surface today's pod name and image hash, not the
+              superseded pod from a resolved incident three sessions ago.
+
+  Session C — zero-shot preference recall.
+              Fresh session, no context. A deployment question is asked with no hints.
+              The agent must pull constraints from memory alone: min replicas,
+              deployment strategy, required labels, ownership rules.
+
+  Session D — world-view synthesis.
+              "Three things a new engineer must know to avoid an incident."
+              Tests that safety-critical world-view entries (tainted node, staging
+              divergence, CDN WAF rules, open memory-leak watch item) surface as
+              practical advice rather than being buried by recency.
+
+  Session E — oldest-fact durability post-compaction.
+              After session A compacted the incident log, a fresh session asks about
+              the very first deployment (180 days ago). Confirms the compaction entry
+              preserved enough founding-era context to answer questions without the
+              original entries.
+"""
+agent_name   = "default"
+provider     = "openai"
+model        = "gpt-5.2-codex"
+max_turns    = 30
+sandbox      = false
+tags         = ["memory", "long-lived", "temporal", "corpus", "incidents", "preferences", "precision"]
+timeout_secs = 300
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "
+    DELETE FROM memories
+    WHERE tags LIKE '%eval-longmem%'
+       OR (source='compaction' AND (
+             lower(content) LIKE '%inc-0312%'
+          OR lower(content) LIKE '%inc-0891%'
+          OR lower(content) LIKE '%inc-1204%'
+          OR lower(content) LIKE '%prod-us-east%'
+          OR lower(content) LIKE '%payments-api%'
+       ));
+  " 2>/dev/null
+fi
+true
+"""
+
+# ── Inject phase 1 — cluster bootstrap and initial deployments (T-180 to T-150) ─
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'prod-us-east cluster bootstrapped. k8s v1.28.0. 6 worker nodes: 4x n2-standard-8, 2x g2-standard-4 GPU. Initial namespaces: api-gw, payments, monitoring.',
+   'eval-longmem,cluster,setup', 'eval',
+   datetime('now', '-180 days'), datetime('now', '-180 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'api-gw first deployment: image registry.internal/api-gw:v1.0.0, 3 replicas, RollingUpdate strategy, maxSurge 1 maxUnavailable 0. Ingress via nginx-ingress-controller.',
+   'eval-longmem,api-gw,deployment', 'eval',
+   datetime('now', '-165 days'), datetime('now', '-165 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Deployment strategy preference: api-gw uses RollingUpdate. payments must use Recreate — state-sensitive, partial rollout would corrupt in-flight transaction ledger entries.',
+   'eval-longmem,preference,deployment,payments,api-gw', 'eval',
+   datetime('now', '-150 days'), datetime('now', '-150 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 2 — api-gw incident INC-0312 lifecycle (T-120 to T-110) ────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0312 opened: api-gw pods memory growing unboundedly. Pod api-gw-6f8c9b-xkl9p OOMKilled at 512Mi limit. 2 pods affected simultaneously. p99 latency spiked to 2800ms. Rollback to v0.9.8 attempted but did not resolve.',
+   'eval-longmem,incident,api-gw,INC-0312', 'eval',
+   datetime('now', '-120 days'), datetime('now', '-120 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0312 root cause confirmed: middleware v1.4.2 introduced unbounded request queue. Timed-out requests enqueued but never drained. Under sustained traffic queue grew without bound until OOM.',
+   'eval-longmem,incident,api-gw,INC-0312,root-cause', 'eval',
+   datetime('now', '-115 days'), datetime('now', '-115 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0312 resolved: upgraded middleware to v1.4.9 which adds bounded queue and timeout drain logic. Pod api-gw-6f8c9b-xkl9p recycled. Stable for 48 hours. Postmortem action: add queue depth metric and alert to api-gw runbook.',
+   'eval-longmem,incident,api-gw,INC-0312,resolved', 'eval',
+   datetime('now', '-110 days'), datetime('now', '-110 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 3 — payments namespace bootstrap (T-90 to T-85) ─────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'payments namespace first deployment: payments-api Deployment, image sha256:a3f7b2c1d8e945f0, 3 replicas, strategy Recreate. Pod payments-api-7d4c2f-mnq8r. PostgreSQL 15 sidecar for transaction audit log.',
+   'eval-longmem,payments,deployment', 'eval',
+   datetime('now', '-90 days'), datetime('now', '-90 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Preference: payments-api must never run fewer than 3 replicas. SLA requires 99.95 percent uptime. HPA minReplicas=3 is enforced by admission webhook. Scaling below 3 is a policy violation.',
+   'eval-longmem,preference,payments,sla,replicas', 'eval',
+   datetime('now', '-85 days'), datetime('now', '-85 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 4 — ML inference namespace (T-75 to T-65) ──────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'inference namespace added. GPU node pool: 2x g2-standard-4 nodes, 40GB VRAM each. Nodes: k8s-gpu-01 and k8s-gpu-02. Tainted gpu=true:NoSchedule to prevent non-GPU workloads.',
+   'eval-longmem,inference,setup,gpu', 'eval',
+   datetime('now', '-75 days'), datetime('now', '-75 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'inference-worker initial deployment: pod infer-74b9c-kzp2s on node k8s-gpu-01. Model llama-3.1-70b, VRAM usage 38GB. Serving /v1/complete endpoint on port 8080.',
+   'eval-longmem,inference,deployment,gpu,llama', 'eval',
+   datetime('now', '-65 days'), datetime('now', '-65 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 5 — payments incident INC-0891 lifecycle (T-55 to T-50) ─────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0891 opened: payments-api pod OOMKilled. Pod payments-api-7d4c2f-mnq8r terminated. Connection pool exhausted before OOM. 503 errors for 14 minutes. Running payments-api v2.1.0.',
+   'eval-longmem,incident,payments,INC-0891', 'eval',
+   datetime('now', '-55 days'), datetime('now', '-55 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0891 root cause: payments-api v2.1.0 leaked connections on the retry path. Pool size 50 insufficient for peak retry storms. Pool exhaustion triggered OOM as goroutines stacked up.',
+   'eval-longmem,incident,payments,INC-0891,root-cause', 'eval',
+   datetime('now', '-52 days'), datetime('now', '-52 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-0891 resolved: connection pool capped at 100 in payments-api v2.1.3. Retry path connection leak fixed. New pod payments-api-9c1f3a-wrt4x. Stable for 72 hours. Pool depth now a monitored metric.',
+   'eval-longmem,incident,payments,INC-0891,resolved', 'eval',
+   datetime('now', '-50 days'), datetime('now', '-50 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 6 — team structure and world-view gotchas (T-45 to T-38) ────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Priya joined the team as SRE. Owns payments namespace and api-gw. Added to on-call rotation. Primary escalation contact for any payments incident.',
+   'eval-longmem,team,sre,payments,api-gw,ownership', 'eval',
+   datetime('now', '-45 days'), datetime('now', '-45 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'World-view: staging cluster is 2 weeks behind prod at all times. Do not use staging for latency benchmarks, connection pool sizing tests, or anything requiring prod-scale traffic patterns. Staging divergence has caused two incorrect capacity decisions.',
+   'eval-longmem,world-view,staging,gotcha', 'eval',
+   datetime('now', '-42 days'), datetime('now', '-42 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Node k8s-worker-07 tainted NoSchedule: intermittent disk I/O errors confirmed by Datadog. No new pods should be scheduled there. Infra ticket open for node replacement. Expected resolution: 2 weeks.',
+   'eval-longmem,world-view,cluster,taint,gotcha', 'eval',
+   datetime('now', '-38 days'), datetime('now', '-38 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 7 — labelling preference and inference upgrade (T-30 to T-28) ───
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Preference: all new service deployments must include labels app.owner, app.team, and app.sla-tier. Missing labels will be rejected by the admission webhook starting next sprint.',
+   'eval-longmem,preference,labelling,deployment', 'eval',
+   datetime('now', '-30 days'), datetime('now', '-30 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'inference-worker upgraded to llama-3.2-90b. New pod infer-92a1d-lmn7k on node k8s-gpu-02. VRAM usage 52GB. Previous pod infer-74b9c-kzp2s terminated. Upgrade required model-specific VRAM tuning.',
+   'eval-longmem,inference,deployment,gpu,llama', 'eval',
+   datetime('now', '-28 days'), datetime('now', '-28 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 8 — inference incident INC-1204 lifecycle (T-20 to T-15) ───────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-1204 opened: inference pod infer-92a1d-lmn7k OOM-evicted. llama-3.2-90b requires 52GB VRAM but g2-standard-4 nodes have only 38-40GB available after OS overhead. Model outgrew node pool capacity.',
+   'eval-longmem,incident,inference,INC-1204', 'eval',
+   datetime('now', '-20 days'), datetime('now', '-20 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'INC-1204 resolved: added one g2-standard-8 node (80GB VRAM) to GPU pool as k8s-gpu-03. Inference pod rescheduled and stable for 24h. Rule: any model requiring more than 40GB VRAM needs a g2-standard-8 or larger node.',
+   'eval-longmem,incident,inference,INC-1204,resolved,gpu', 'eval',
+   datetime('now', '-15 days'), datetime('now', '-15 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Inject phase 9 — current cluster state (T-10 to T-1) ────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'payments-api v2.2.0 deployed: pod payments-api-b3e8c1-qvp5z, image sha256:d94f17e36bc801f2, 3 replicas all healthy. Supersedes v2.1.3 pod payments-api-9c1f3a-wrt4x which has been terminated.',
+   'eval-longmem,payments,deployment,current', 'eval',
+   datetime('now', '-10 days'), datetime('now', '-10 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'api-gw p99 latency elevated to 420ms, up from 180ms baseline. No OOM, no error rate increase. Suspected: CDN WAF rate-limiting high-frequency endpoints. Under investigation.',
+   'eval-longmem,api-gw,watch-item,latency', 'eval',
+   datetime('now', '-7 days'), datetime('now', '-7 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'World-view: Cloudflare CDN and WAF in front of all prod services. WAF rule CF-8821 blocks /admin/* on prod. Rule CF-9104 rate-limits /api/v2/checkout to 200 req/sec per IP.',
+   'eval-longmem,world-view,cdn,waf,cloudflare', 'eval',
+   datetime('now', '-5 days'), datetime('now', '-5 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Preference: Priya requires all runbooks live in /docs/runbooks/ in the main repo. Notion runbooks are deprecated — not reliably accessible during incidents on mobile or in airplane mode.',
+   'eval-longmem,preference,runbooks,priya', 'eval',
+   datetime('now', '-3 days'), datetime('now', '-3 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Watch item: inference-worker RSS growing approximately 2MB per hour since llama-3.2-90b upgrade. Not yet at alert threshold (+500MB). Probable slow leak in tokenizer batch path. Monitoring closely.',
+   'eval-longmem,inference,watch-item,memory-leak', 'eval',
+   datetime('now', '-2 days'), datetime('now', '-2 days'));
+
+INSERT INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))),
+   'Preference: any schema migration for payments PostgreSQL requires explicit approval from Priya before applying to prod. No exceptions, even for additive migrations.',
+   'eval-longmem,preference,payments,database,priya,approval', 'eval',
+   datetime('now', '-1 days'), datetime('now', '-1 days'));
+" 2>/dev/null
+true
+"""
+
+# ── Assert: all 26 entries injected ───────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+COUNT=$(sqlite3 "$DB" "SELECT count(*) FROM memories WHERE tags LIKE '%eval-longmem%'")
+echo "Injected: $COUNT entries (expected 26)"
+[ "$COUNT" -eq 26 ]
+"""
+
+# ── Session A — incident timeline reconstruction ───────────────────────────────
+# The query is phrased as a business review, not using incident IDs or technical
+# terms from the stored entries. The agent must query broadly and stitch together
+# three separate incident lifecycles from entries spread across 120, 55, and 20 days.
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I am preparing a retrospective for the engineering leadership team and need a complete record of every production outage we have experienced. Walk me through each one — when it happened, what the impact was, what turned out to be the underlying cause, and how it was ultimately resolved. I want the full picture in chronological order.
+"""
+
+# Session A — compact the incident log into a canonical pinned entry
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Good. Please consolidate everything you just recalled into a single authoritative incident log entry in your memory — one pinned note that captures all three incidents with their root causes, resolutions, and any operational lessons. This will be the canonical reference going forward.
+"""
+
+# Assert: a consolidated entry covering all three incidents was written
+# Does not require source='compaction' — the agent may use mem_add or mem_compact;
+# the rubric criterion scores which tool was used and whether it is pinned.
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+  SELECT count(*) FROM memories
+  WHERE lower(content) LIKE '%inc-0312%'
+    AND lower(content) LIKE '%inc-0891%'
+    AND lower(content) LIKE '%inc-1204%'
+    AND created_at > datetime('now', '-10 minutes')
+" | grep -qE '^[1-9]'
+"""
+
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 1
+
+# ── Session boundary ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Session B — exact current-state precision ──────────────────────────────────
+# The agent must return the CURRENT pod and image hash (b3e8c1-qvp5z / d94f17e3),
+# not the superseded pod from the resolved INC-0891 (9c1f3a-wrt4x / sha256:a3f7b2c1).
+# Both exist in memory. Precision under recency is what is being tested.
+[[steps]]
+type    = "prompt"
+session = "B"
+content = """
+I need the exact pod name and full image hash currently running for payments-api, along with the version. I am writing a rollback runbook and the identifiers must be accurate.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 2
+
+# ── Session boundary ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "B"
+
+# ── Session C — zero-shot preference recall ────────────────────────────────────
+# Fresh session. No mention of incidents, pod names, or memory. A new deployment
+# question is asked. The agent must recall min replicas, Recreate strategy, required
+# labels, Priya ownership, and database migration approval — from memory alone.
+[[steps]]
+type    = "prompt"
+session = "C"
+content = """
+I am about to deploy a new service into the payments namespace. Before I write the manifest, what are all the deployment constraints, SLA requirements, and team conventions I need to follow? I want to make sure I do not miss anything.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 3
+
+# ── Session boundary ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "C"
+
+# ── Session D — world-view synthesis ─────────────────────────────────────────────
+# The agent is asked for practical safety knowledge for a new engineer.
+# Good answers surface: k8s-worker-07 taint, staging divergence, CDN WAF rules,
+# and the inference memory-leak watch item — entries scattered across 38, 42, 5,
+# and 2 days ago. None of these are incident entries. They live in world-view and
+# watch-item tags and would not surface from an incident-focused query.
+[[steps]]
+type    = "prompt"
+session = "D"
+content = """
+A new engineer joins the team tomorrow. What are the three most important things about our cluster setup and current operational state that they need to know to avoid causing an incident in their first week? Keep it practical.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 4
+
+# ── Session boundary ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "D"
+
+# ── Session E — oldest-fact durability post-compaction ────────────────────────
+# Session A compacted the incident log. This fresh session asks about the payments
+# namespace founding — 90 days ago — which was NOT part of the incident compaction.
+# The original entry (payments-api-7d4c2f-mnq8r / sha256:a3f7b2c1d8e945f0) still
+# lives in the raw corpus and the compaction may reference payments context.
+# This confirms oldest non-incident entries survive a long memory run.
+[[steps]]
+type    = "prompt"
+session = "E"
+content = """
+Looking back at the early days of our payments service — when did it first go live, what was the initial deployment spec, and how does that original setup compare to where things stand now?
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool      = "mem_recall"
+min_count = 5
+
+# ── Session boundary ────────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "E"
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "
+    DELETE FROM memories
+    WHERE tags LIKE '%eval-longmem%'
+       OR (source='compaction' AND (
+             lower(content) LIKE '%inc-0312%'
+          OR lower(content) LIKE '%inc-0891%'
+          OR lower(content) LIKE '%inc-1204%'
+          OR lower(content) LIKE '%prod-us-east%'
+          OR lower(content) LIKE '%payments-api%'
+       ));
+  " 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "incident_chronology"
+description = """
+In session A, the agent retrieved and correctly described all three incidents in
+chronological order: INC-0312 (api-gw OOM from unbounded middleware queue, ~120 days
+ago), INC-0891 (payments-api connection pool exhaustion, ~55 days ago), and INC-1204
+(inference pod OOM from model size exceeding node VRAM, ~20 days ago). Each incident
+should include impact, root cause, and resolution. Low score if only the two recent
+incidents appear or if root causes are confused across incidents. Zero if the agent
+recalled only from the compaction entry it created — the first response must draw from
+raw corpus entries.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "exact_id_precision"
+description = """
+In session B, the agent returned the CURRENT pod name (payments-api-b3e8c1-qvp5z) and
+image hash (sha256:d94f17e36bc801f2 / v2.2.0). Full marks if correct. Significant
+penalty if the superseded pod from INC-0891 (payments-api-9c1f3a-wrt4x, v2.1.3) is
+returned instead — this is the core precision test. Partial credit if both are mentioned
+but the current one is clearly identified as current.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "preference_recall"
+description = """
+In session C, a fresh session with no context asks about payments deployment constraints.
+The agent should surface from memory: (1) minimum 3 replicas enforced by HPA and SLA,
+(2) Recreate deployment strategy required, (3) mandatory labels app.owner / app.team /
+app.sla-tier, (4) Priya is the owner and on-call contact for payments, (5) any database
+migration requires Priya approval. High score: 4 or 5 of these retrieved unprompted.
+Low score: agent answers from general knowledge rather than memory lookup, or retrieves
+fewer than 2.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "world_view_synthesis"
+description = """
+In session D, the agent was asked for three safety-critical things for a new engineer.
+Good answers draw from: (1) node k8s-worker-07 tainted NoSchedule — avoid scheduling
+there, (2) staging is 2 weeks behind prod — do not use for benchmarks, (3) CDN WAF
+rules CF-8821 and CF-9104 affect prod endpoints, (4) inference-worker has an active
+memory-leak watch item that may become an incident. These are spread across world-view
+and watch-item tagged entries from 2 to 42 days ago. High score: 3 or more of these
+surfaced as practical advice. Low score: agent surfaces only recent incident entries
+and misses the latent world-view context.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "oldest_fact_survival"
+description = """
+In session E (post-compaction, fresh session), the agent correctly recalled the payments
+namespace founding context: first deployment ~90 days ago, initial pod
+payments-api-7d4c2f-mnq8r, image sha256:a3f7b2c1d8e945f0, 3 replicas, Recreate
+strategy, PostgreSQL sidecar. The agent should also contrast this with the current state
+(v2.2.0, pod payments-api-b3e8c1-qvp5z) to demonstrate it can hold both founding and
+current facts simultaneously. Low score if agent cannot recall the original pod name or
+image hash, indicating oldest entries were not indexed or were displaced by recency.
+"""
+weight = 10
+
+[[rubric.criteria]]
+name        = "compaction_quality"
+description = """
+The compaction entry created in session A should be a coherent, actionable incident log —
+not a raw dump of entries. It should capture all three incidents, distinguish root causes
+clearly, and note the resolved status of each. A reader should be able to understand the
+full incident history from this single entry alone. Low score if the entry is a
+verbatim copy-paste of stored content rather than a synthesized narrative.
+"""
+weight = 5
+
+[[rubric.criteria]]
+name        = "no_hallucination"
+description = """
+Every specific technical claim across all five sessions — pod names, image hashes,
+version numbers, incident IDs, VRAM capacities, node names, WAF rule IDs, connection
+pool sizes — must be traceable to one of the 26 injected entries. The agent must not
+invent plausible-sounding pod names, version numbers, or incident details. One
+uninvented specific technical identifier counts as a hallucination.
+"""
+weight = 5
