@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  packages: write 
 
 jobs:
   build-and-push:
