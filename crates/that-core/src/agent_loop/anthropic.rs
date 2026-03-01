@@ -93,7 +93,7 @@ pub(super) async fn stream_turn(
     loop {
         let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
-            Ok(None) => break,  // Stream ended cleanly.
+            Ok(None) => break, // Stream ended cleanly.
             Err(_elapsed) => {
                 return Err(anyhow::anyhow!(
                     "Anthropic SSE stream timed out: no data for {}s",
@@ -352,10 +352,7 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
     // the last message is also the only message (turn 1) — in that case
     // the system + tools breakpoints already cover the cacheable prefix.
     if prompt_caching && out.len() > 1 {
-        if let Some(last_user_idx) = out
-            .iter()
-            .rposition(|m| m["role"].as_str() == Some("user"))
-        {
+        if let Some(last_user_idx) = out.iter().rposition(|m| m["role"].as_str() == Some("user")) {
             let msg = &mut out[last_user_idx];
             // Content is either a string (plain user message) or an array
             // (tool_result blocks or image + text blocks). For cache_control
@@ -369,8 +366,7 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
                 }]);
             } else if let Some(arr) = msg["content"].as_array_mut() {
                 if let Some(last_block) = arr.last_mut() {
-                    last_block["cache_control"] =
-                        serde_json::json!({ "type": "ephemeral" });
+                    last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
                 }
             }
         }

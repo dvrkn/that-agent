@@ -64,7 +64,7 @@ pub(super) async fn stream_turn(
     loop {
         let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
-            Ok(None) => break,  // Stream ended cleanly.
+            Ok(None) => break, // Stream ended cleanly.
             Err(_elapsed) => {
                 return Err(anyhow::anyhow!(
                     "OpenRouter SSE stream timed out: no data for {}s",
@@ -401,12 +401,10 @@ fn messages_to_chat_completions(
     // Add cache breakpoint to the last user/tool message so the conversation
     // prefix is cached. Skip on turn 1 (only system message + 1 user message).
     if prompt_caching && out.len() > 2 {
-        if let Some(last_user_idx) = out.iter().rposition(|m| {
-            matches!(
-                m["role"].as_str(),
-                Some("user") | Some("tool")
-            )
-        }) {
+        if let Some(last_user_idx) = out
+            .iter()
+            .rposition(|m| matches!(m["role"].as_str(), Some("user") | Some("tool")))
+        {
             let msg = &mut out[last_user_idx];
             // For tool messages, content is a plain string — convert to content array.
             // For user messages, content may be string or array.
@@ -419,8 +417,7 @@ fn messages_to_chat_completions(
                 }]);
             } else if let Some(arr) = msg["content"].as_array_mut() {
                 if let Some(last_block) = arr.last_mut() {
-                    last_block["cache_control"] =
-                        serde_json::json!({ "type": "ephemeral" });
+                    last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
                 }
             }
         }

@@ -225,7 +225,7 @@ async fn stream_turn_http(
     loop {
         let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
-            Ok(None) => break,  // Stream ended cleanly.
+            Ok(None) => break, // Stream ended cleanly.
             Err(_elapsed) => {
                 return Err(anyhow::anyhow!(
                     "OpenAI SSE stream timed out: no data for {}s",
@@ -313,7 +313,7 @@ async fn read_ws_turn(
     loop {
         let msg = match tokio::time::timeout(idle_timeout, ws.next()).await {
             Ok(Some(msg)) => msg.map_err(|e| TurnFailure::Transport(e.into()))?,
-            Ok(None) => break,  // WebSocket closed cleanly.
+            Ok(None) => break, // WebSocket closed cleanly.
             Err(_elapsed) => {
                 return Err(TurnFailure::Transport(anyhow::anyhow!(
                     "OpenAI WebSocket stream timed out: no data for {}s",
