@@ -186,8 +186,7 @@ fn default_skills_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// Falls back to the first non-empty, non-heading line if no frontmatter is found.
 fn skill_description(text: &str) -> String {
     let trimmed = text.trim_start();
-    if trimmed.starts_with("---") {
-        let after_open = &trimmed[3..];
+    if let Some(after_open) = trimmed.strip_prefix("---") {
         if let Some(end) = after_open.find("\n---") {
             let frontmatter = &after_open[..end];
             for line in frontmatter.lines() {
