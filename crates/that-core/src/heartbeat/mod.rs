@@ -505,7 +505,9 @@ pub fn is_entry_due(entry: &HeartbeatEntry, agent_tz: Option<&str>) -> bool {
         },
         Schedule::Cron(expr) => {
             let wall_now = wall_datetime_naive(now, agent_tz);
-            let wall_last = entry.last_run.map(|l| wall_datetime_naive(l.to_utc(), agent_tz));
+            let wall_last = entry
+                .last_run
+                .map(|l| wall_datetime_naive(l.to_utc(), agent_tz));
             is_cron_due(expr, wall_last, wall_now)
         }
         Schedule::Unknown(_) => false,
@@ -772,7 +774,11 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
 
-    fn make_entry(schedule: Schedule, last_run: Option<DateTime<Local>>, not_before: Option<DateTime<Local>>) -> HeartbeatEntry {
+    fn make_entry(
+        schedule: Schedule,
+        last_run: Option<DateTime<Local>>,
+        not_before: Option<DateTime<Local>>,
+    ) -> HeartbeatEntry {
         HeartbeatEntry {
             title: "test".into(),
             priority: Priority::Normal,
@@ -840,10 +846,7 @@ mod tests {
         // Create an entry that last ran "today" in UTC but "yesterday" in a far-west timezone.
         // Use a fixed UTC time just after midnight UTC — in US/Samoa (UTC-11) it's still the
         // previous day, so a daily entry should be due there but NOT due in UTC+12.
-        let utc_midnight = Utc::now()
-            .date_naive()
-            .and_hms_opt(0, 30, 0)
-            .unwrap();
+        let utc_midnight = Utc::now().date_naive().and_hms_opt(0, 30, 0).unwrap();
         let last_run_utc = Utc.from_utc_datetime(&utc_midnight);
         let last_run_local = last_run_utc.with_timezone(&Local);
 
