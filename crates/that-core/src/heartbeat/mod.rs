@@ -473,7 +473,12 @@ pub fn is_entry_due(entry: &HeartbeatEntry, agent_tz: Option<&str>) -> bool {
     }
 
     // Urgent entries trigger immediately on first dispatch, then follow schedule.
-    if matches!(entry.priority, Priority::Urgent) && entry.last_run.is_none() {
+    // Skip for `once` — urgent fast-path is redundant (once fires on next poll anyway)
+    // and breaks deferred reminders when the LLM forgets to set not_before.
+    if matches!(entry.priority, Priority::Urgent)
+        && entry.last_run.is_none()
+        && !matches!(entry.schedule, Schedule::Once)
+    {
         return true;
     }
 
@@ -814,6 +819,21 @@ mod tests {
     }
 
     #[test]
+    fn urgent_once_does_not_get_fast_path() {
+        // urgent + once behaves like normal once (fires on next poll via Schedule::Once branch).
+        // The urgent fast-path is only for recurring schedules.
+        let mut entry = make_entry(Schedule::Once, None, None);
+        entry.priority = Priority::Urgent;
+        // Still fires (via the Once branch), but through normal path not urgent fast-path.
+        assert!(is_entry_due(&entry, None));
+
+        // Urgent + daily with no last_run DOES get the fast-path.
+        let mut daily = make_entry(Schedule::Daily, None, None);
+        daily.priority = Priority::Urgent;
+        assert!(is_entry_due(&daily, None));
+    }
+
+    #[test]
     fn not_before_blocks_even_urgent() {
         let future = Local::now() + Duration::hours(1);
         let mut entry = make_entry(Schedule::Once, None, Some(future));
@@ -870,5 +890,285 @@ mod tests {
         let entry = make_entry(Schedule::Once, None, None);
         // Should not panic; falls back to Local.
         assert!(is_entry_due(&entry, Some("Invalid/Timezone")));
+    }
+
+    // ── Regression: "remind me in N minutes" fires immediately ──────────
+
+    #[test]
+    fn reminder_pattern_once_urgent_no_not_before_fires_via_once_branch() {
+        // The LLM might write priority:urgent + schedule:once with no not_before.
+        // Before the fix, the urgent fast-path fired it instantly.
+        // After: it still fires (via Schedule::Once branch, last_run is None),
+        // but NOT through the urgent fast-path. The distinction matters when
+        // not_before is set — urgent must not bypass it.
+        let mut entry = make_entry(Schedule::Once, None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn reminder_pattern_once_urgent_with_not_before_waits() {
+        // Correct reminder: once + urgent + not_before in future → must NOT fire.
+        let future = Local::now() + Duration::minutes(5);
+        let mut entry = make_entry(Schedule::Once, None, Some(future));
+        entry.priority = Priority::Urgent;
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn reminder_pattern_once_normal_with_not_before_waits() {
+        // Correct reminder: once + normal + not_before in future → must NOT fire.
+        let future = Local::now() + Duration::minutes(2);
+        let entry = make_entry(Schedule::Once, None, Some(future));
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn reminder_pattern_once_normal_with_not_before_elapsed_fires() {
+        // not_before has passed → once entry with no last_run fires.
+        let past = Local::now() - Duration::seconds(10);
+        let entry = make_entry(Schedule::Once, None, Some(past));
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn reminder_once_already_ran_does_not_refire() {
+        // Once entry that already ran (last_run set) must never fire again,
+        // even if not_before is in the past.
+        let past = Local::now() - Duration::minutes(10);
+        let entry = make_entry(
+            Schedule::Once,
+            Some(past),
+            Some(past - Duration::minutes(5)),
+        );
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    // ── Urgent fast-path for recurring schedules ────────────────────────
+
+    #[test]
+    fn urgent_daily_no_last_run_fires_immediately() {
+        let mut entry = make_entry(Schedule::Daily, None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn urgent_hourly_no_last_run_fires_immediately() {
+        let mut entry = make_entry(Schedule::Hourly, None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn urgent_weekly_no_last_run_fires_immediately() {
+        let mut entry = make_entry(Schedule::Weekly, None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn urgent_cron_no_last_run_fires_immediately() {
+        let mut entry = make_entry(Schedule::Cron("0 9 * * *".into()), None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn urgent_minutely_no_last_run_fires_immediately() {
+        let mut entry = make_entry(Schedule::Minutely, None, None);
+        entry.priority = Priority::Urgent;
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn urgent_recurring_with_not_before_future_blocked() {
+        // Even recurring urgent entries must respect not_before.
+        let future = Local::now() + Duration::hours(1);
+        for sched in [
+            Schedule::Daily,
+            Schedule::Hourly,
+            Schedule::Weekly,
+            Schedule::Minutely,
+        ] {
+            let mut entry = make_entry(sched.clone(), None, Some(future));
+            entry.priority = Priority::Urgent;
+            assert!(
+                !is_entry_due(&entry, None),
+                "urgent {:?} should be blocked by not_before in future",
+                sched
+            );
+        }
+    }
+
+    #[test]
+    fn urgent_recurring_with_not_before_past_fires() {
+        let past = Local::now() - Duration::minutes(1);
+        for sched in [
+            Schedule::Daily,
+            Schedule::Hourly,
+            Schedule::Weekly,
+            Schedule::Minutely,
+        ] {
+            let mut entry = make_entry(sched.clone(), None, Some(past));
+            entry.priority = Priority::Urgent;
+            assert!(
+                is_entry_due(&entry, None),
+                "urgent {:?} should fire when not_before has passed",
+                sched
+            );
+        }
+    }
+
+    // ── not_before interaction with every schedule type ──────────────────
+
+    #[test]
+    fn not_before_blocks_all_schedule_types() {
+        let future = Local::now() + Duration::hours(2);
+        let schedules = vec![
+            Schedule::Once,
+            Schedule::Minutely,
+            Schedule::Hourly,
+            Schedule::Daily,
+            Schedule::Weekly,
+            Schedule::Cron("* * * * *".into()),
+        ];
+        for sched in schedules {
+            let entry = make_entry(sched.clone(), None, Some(future));
+            assert!(
+                !is_entry_due(&entry, None),
+                "{:?} should be blocked by not_before in future",
+                sched
+            );
+        }
+    }
+
+    #[test]
+    fn not_before_past_allows_all_schedule_types() {
+        let past = Local::now() - Duration::hours(2);
+        let schedules = vec![
+            Schedule::Once,
+            Schedule::Minutely,
+            Schedule::Hourly,
+            Schedule::Daily,
+            Schedule::Weekly,
+        ];
+        for sched in schedules {
+            let entry = make_entry(sched.clone(), None, Some(past));
+            assert!(
+                is_entry_due(&entry, None),
+                "{:?} should fire when not_before has passed and no last_run",
+                sched
+            );
+        }
+    }
+
+    // ── Schedule boundary conditions ────────────────────────────────────
+
+    #[test]
+    fn minutely_not_due_within_60s() {
+        let recent = Local::now() - Duration::seconds(30);
+        let entry = make_entry(Schedule::Minutely, Some(recent), None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn minutely_due_after_60s() {
+        let old = Local::now() - Duration::seconds(61);
+        let entry = make_entry(Schedule::Minutely, Some(old), None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn hourly_not_due_within_1h() {
+        let recent = Local::now() - Duration::minutes(30);
+        let entry = make_entry(Schedule::Hourly, Some(recent), None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn hourly_due_after_1h() {
+        let old = Local::now() - Duration::minutes(61);
+        let entry = make_entry(Schedule::Hourly, Some(old), None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn weekly_not_due_within_7d() {
+        let recent = Local::now() - Duration::days(3);
+        let entry = make_entry(Schedule::Weekly, Some(recent), None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn weekly_due_after_7d() {
+        let old = Local::now() - Duration::days(8);
+        let entry = make_entry(Schedule::Weekly, Some(old), None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn unknown_schedule_never_fires() {
+        let entry = make_entry(Schedule::Unknown("bogus".into()), None, None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    // ── Parse edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_entry_without_not_before_has_none() {
+        let md = "# Heartbeat\n\n## Task\npriority: normal\nschedule: daily\nstatus: pending\n\nDo stuff\n\n---\n";
+        let entries = parse_heartbeat(md);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].not_before.is_none());
+    }
+
+    #[test]
+    fn parse_invalid_not_before_treated_as_none() {
+        let md = "# Heartbeat\n\n## Task\nnot_before: not-a-date\nschedule: once\nstatus: pending\n\nDo stuff\n\n---\n";
+        let entries = parse_heartbeat(md);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].not_before.is_none());
+    }
+
+    #[test]
+    fn serialize_entry_without_not_before_omits_field() {
+        let entry = make_entry(Schedule::Once, None, None);
+        let out = serialize_heartbeat(&[entry]);
+        assert!(!out.contains("not_before"));
+    }
+
+    #[test]
+    fn parse_multiple_entries_mixed_not_before() {
+        let md = format!(
+            "# Heartbeat\n\n\
+             ## With NB\npriority: normal\nschedule: once\nnot_before: {}\nstatus: pending\n\nA\n\n---\n\
+             ## Without NB\npriority: normal\nschedule: daily\nstatus: running\n\nB\n\n---\n",
+            Local::now().to_rfc3339()
+        );
+        let entries = parse_heartbeat(&md);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].not_before.is_some());
+        assert!(entries[1].not_before.is_none());
+    }
+
+    // ── Timezone with cron ──────────────────────────────────────────────
+
+    #[test]
+    fn cron_respects_timezone_param() {
+        // Verify cron path doesn't panic with valid and invalid TZ.
+        let entry = make_entry(Schedule::Cron("0 12 * * *".into()), None, None);
+        let _ = is_entry_due(&entry, Some("America/New_York"));
+        let _ = is_entry_due(&entry, Some("Europe/London"));
+        let _ = is_entry_due(&entry, Some("Fake/Zone"));
+        let _ = is_entry_due(&entry, None);
+    }
+
+    #[test]
+    fn daily_no_last_run_fires_regardless_of_tz() {
+        let entry = make_entry(Schedule::Daily, None, None);
+        assert!(is_entry_due(&entry, Some("US/Eastern")));
+        assert!(is_entry_due(&entry, Some("Asia/Tokyo")));
+        assert!(is_entry_due(&entry, None));
     }
 }
