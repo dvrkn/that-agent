@@ -47,6 +47,11 @@ const TRACE_PREVIEW_CHARS: usize = 400;
 const TRACE_LLM_IO_CHARS: usize = 4_000;
 /// Max chars logged for tool call args/results in app logs (compact single-line).
 const TOOL_LOG_PREVIEW_CHARS: usize = 120;
+/// Hard ceiling on tool result chars allowed into conversation context.
+/// ~8K tokens at ~4 chars/token. Generous for structured data, fatal for base64.
+const MAX_TOOL_RESULT_CHARS: usize = 32_000;
+/// Minimum consecutive base64-alphabet chars to flag a blob.
+const BASE64_BLOB_MIN_LEN: usize = 1_000;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -341,10 +346,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             );
 
             hook.on_tool_result(&tc.name, &tc.call_id, &result).await;
+            let content = sanitize_tool_result(&tc.name, &result);
             messages.push(Message::Tool {
                 call_id: tc.call_id.clone(),
                 name: tc.name.clone(),
-                content: result,
+                content,
             });
         }
 
@@ -736,6 +742,100 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+// ─── Tool result sanitization ────────────────────────────────────────────────
+
+/// Sanitize a tool result before it enters conversation history.
+/// Strips base64 blobs (useless to the LLM) and enforces a hard char ceiling.
+fn sanitize_tool_result(name: &str, result: &str) -> String {
+    // Fast path: small result with no base64 — return as-is.
+    if result.len() <= MAX_TOOL_RESULT_CHARS && !likely_contains_base64(result) {
+        return result.to_string();
+    }
+
+    // Try JSON-aware base64 stripping first.
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(result) {
+        let stripped = strip_base64_blobs(&mut value);
+        let cleaned = value.to_string();
+        if stripped > 0 {
+            tracing::warn!(
+                tool = %name,
+                blobs_stripped = stripped,
+                original_chars = result.len(),
+                cleaned_chars = cleaned.len(),
+                "stripped base64 blobs from tool result"
+            );
+        }
+        if cleaned.len() <= MAX_TOOL_RESULT_CHARS {
+            return cleaned;
+        }
+        // Still too large — truncate.
+        let truncated = truncate_chars(&cleaned, MAX_TOOL_RESULT_CHARS);
+        tracing::warn!(tool = %name, original_chars = result.len(), "tool result truncated");
+        return serde_json::json!({
+            "truncated_result": truncated,
+            "original_chars": result.len(),
+            "note": "Result exceeded size limit and was truncated. Request smaller/specific data."
+        })
+        .to_string();
+    }
+
+    // Non-JSON — just truncate.
+    if result.len() > MAX_TOOL_RESULT_CHARS {
+        let truncated = truncate_chars(result, MAX_TOOL_RESULT_CHARS);
+        tracing::warn!(tool = %name, original_chars = result.len(), "tool result truncated");
+        return serde_json::json!({
+            "truncated_result": truncated,
+            "original_chars": result.len(),
+            "note": "Result exceeded size limit and was truncated. Request smaller/specific data."
+        })
+        .to_string();
+    }
+
+    result.to_string()
+}
+
+/// Quick byte scan: does the string contain a run of 1000+ base64-alphabet chars?
+fn likely_contains_base64(s: &str) -> bool {
+    let mut run = 0usize;
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' {
+            run += 1;
+            if run >= BASE64_BLOB_MIN_LEN {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// Walk a JSON value and replace base64 blob strings with a size placeholder.
+fn strip_base64_blobs(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(s) if is_base64_blob(s) => {
+            let len = s.len();
+            *value = serde_json::Value::String(format!("[base64 data stripped, {len} chars]"));
+            1
+        }
+        serde_json::Value::Array(arr) => arr.iter_mut().map(strip_base64_blobs).sum(),
+        serde_json::Value::Object(map) => map.values_mut().map(strip_base64_blobs).sum(),
+        _ => 0,
+    }
+}
+
+/// Check if a string is a base64 blob: long run, 95%+ base64-alphabet chars.
+fn is_base64_blob(s: &str) -> bool {
+    if s.len() < BASE64_BLOB_MIN_LEN {
+        return false;
+    }
+    let b64_count = s
+        .bytes()
+        .filter(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'=')
+        .count();
+    b64_count * 100 / s.len() >= 95
 }
 
 fn tool_arg_path(args_json: &str) -> Option<String> {

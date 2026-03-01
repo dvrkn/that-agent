@@ -39,6 +39,7 @@ pub(super) async fn stream_turn(
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
+        .header("X-Title", "that-agent")
         .body(body)
         .send()
         .await?;
