@@ -63,8 +63,12 @@ History reconstruction anchors at the last `Compaction` event to prevent context
 
 - `urgent` entries fire immediately on first dispatch, then follow schedule.
 - All others fire when `last_run + interval <= now`.
+- `not_before: <RFC3339>` gates firing — entry stays dormant until that timestamp passes. Used for deferred reminders ("remind me in 5 minutes").
 - `status: done` permanently disables an entry.
 - Schedules: `once | minutely | hourly | daily | weekly | cron: <expr>`
+- `timezone` on `AgentDef` (IANA name) controls wall-clock schedules (`daily`, `cron`). Duration-based schedules use absolute UTC.
+
+**Preamble must teach the agent about new Heartbeat fields.** The LLM only knows what the preamble tells it — adding a field to the struct/parser without updating the preamble guidance in `orchestration/preamble.rs` means the agent will never use it. The `not_before` bug was exactly this: the field existed but the agent used cron hacks because the preamble didn't mention it.
 
 ### Channel Router
 
@@ -122,6 +126,10 @@ When a sub-agent is deployed to the cluster:
 ### Code Minimalism — Critical
 
 **As few lines of code as possible.** Every line is a maintenance burden. Prefer composition over duplication, thin abstractions over defensive layering, and deletion over accumulation. If two features can share a path, they must. If something can be expressed in 10 lines instead of 30, it must be. Complexity is a liability, not a feature.
+
+## Pre-commit Checks
+
+Always run `cargo fmt --all` before committing — CI enforces `cargo fmt --all --check` and will reject unformatted code. Run `cargo clippy --workspace -- -D warnings` as well.
 
 ## Model Preferences
 
