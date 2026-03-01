@@ -210,7 +210,9 @@ pub fn build_preamble(
          For reminders or deferred one-time tasks, use `schedule: once` with a `not_before:` field set to an RFC3339 timestamp — the entry will not fire until that time. \
          Do not use `priority: urgent` or cron hacks for reminders; just set `not_before` to the target time.\n\
          For recurring entries, use `status: running`; set `status: done` only to disable.\n\
-         Prefer Heartbeat schedules over installing/configuring system cron daemons for agent recurrence.\n\n",
+         Prefer Heartbeat schedules over installing/configuring system cron daemons for agent recurrence.\n\
+         To set your timezone, add `timezone = \"IANA/Name\"` to your agent config.toml — never hack shell profiles or /etc/localtime. \
+         The runtime uses this field for wall-clock schedules (daily, cron) and all timestamps.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────
