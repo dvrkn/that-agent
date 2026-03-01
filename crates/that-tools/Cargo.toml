@@ -48,7 +48,7 @@ libc = "0.2"
 similar = "2"
 diffy = "0.4"
 git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
-rusqlite = { version = "0.34" }
+rusqlite = { version = "0.34", features = ["bundled"] }
 petgraph = "0.8"
 sha2 = "0.10"
 streaming-iterator = "0.1"
@@ -78,7 +78,7 @@ assert_cmd = "2"
 predicates = "3"
 pretty_assertions = "1"
 tiktoken-rs = "0.6"
-rusqlite = { version = "0.34" }
+rusqlite = { version = "0.34", features = ["bundled"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
