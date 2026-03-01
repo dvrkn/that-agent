@@ -224,7 +224,7 @@ that listen
 ## Sandbox
 
 ```bash
-./sandbox/build.sh
+./build.sh
 that run "Create a demo app and run its tests"
 ```
 

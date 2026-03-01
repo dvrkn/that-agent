@@ -105,7 +105,7 @@ Sandbox mode isolates agent filesystem and shell operations inside a container. 
 Build the sandbox image from the workspace root:
 
 ```bash
-./sandbox/build.sh
+./build.sh
 ```
 
 The image is a multi-stage build: a Rust builder stage followed by a `python:3.12-slim` runtime stage.

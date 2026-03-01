@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-IMAGE_NAME="${THAT_AGENT_SANDBOX_IMAGE:-that-agent-sandbox}"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_NAME="${THAT_AGENT_IMAGE:-that-agent}"
 CACHE_DIR="${THAT_SANDBOX_BUILD_CACHE_DIR:-$PROJECT_DIR/.cache/that-sandbox-buildx}"
 
-echo "Building sandbox image: $IMAGE_NAME"
-echo "Workspace:              $PROJECT_DIR"
+echo "Building agent image: $IMAGE_NAME"
+echo "Workspace:            $PROJECT_DIR"
 
 # Create a temporary build context
 BUILD_CTX=$(mktemp -d)
 trap 'rm -rf "$BUILD_CTX"' EXIT
 
-cp "$SCRIPT_DIR/Dockerfile" "$BUILD_CTX/"
+cp "$PROJECT_DIR/Dockerfile" "$BUILD_CTX/"
 
 # Copy the workspace source — exclude heavy / irrelevant dirs
 rsync -a \
@@ -23,12 +22,11 @@ rsync -a \
     --exclude='/node_modules' \
     --exclude='/that-agent' \
     --exclude='/agentic-tools' \
-    --exclude='/sandbox' \
     "$PROJECT_DIR/" "$BUILD_CTX/"
 
 # Bake built-in skills into the image
-if [ -d "$SCRIPT_DIR/skills" ]; then
-    cp -r "$SCRIPT_DIR/skills" "$BUILD_CTX/skills"
+if [ -d "$PROJECT_DIR/skills" ]; then
+    cp -r "$PROJECT_DIR/skills" "$BUILD_CTX/skills"
 fi
 
 if docker buildx version >/dev/null 2>&1; then
@@ -55,5 +53,5 @@ else
 fi
 
 echo ""
-echo "Sandbox image built: $IMAGE_NAME"
+echo "Agent image built: $IMAGE_NAME"
 echo "Run 'that --sandbox run <task>' to use it"

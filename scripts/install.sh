@@ -322,13 +322,13 @@ esac
 # ── Step 4: Build or pull image ──────────────────────────────────────────────
 header "Step 4 — Container image"
 
-if [[ -f "${REPO_ROOT}/sandbox/build.sh" ]] && command -v docker &>/dev/null; then
+if [[ -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
   echo ""
   read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL
   case "${BUILD_LOCAL:-n}" in
     [Yy]*)
       info "Building that-agent image from source…"
-      bash "${REPO_ROOT}/sandbox/build.sh"
+      bash "${REPO_ROOT}/build.sh"
       BUILT_IMAGE="that-agent:latest"
       # Import into k3s if we're using k3s
       if command -v k3s &>/dev/null; then

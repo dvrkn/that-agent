@@ -92,7 +92,7 @@ echo "=========================================="
 BUILD_CTX="$(mktemp -d)"
 trap 'rm -rf "$BUILD_CTX"' EXIT
 
-cp "$PROJECT_DIR/sandbox/Dockerfile" "$BUILD_CTX/Dockerfile"
+cp "$PROJECT_DIR/Dockerfile" "$BUILD_CTX/Dockerfile"
 
 rsync -a --prune-empty-dirs \
   --include='/Cargo.toml' \
@@ -103,8 +103,8 @@ rsync -a --prune-empty-dirs \
   --exclude='*' \
   "$PROJECT_DIR/" "$BUILD_CTX/"
 
-if [ -d "$PROJECT_DIR/sandbox/skills" ]; then
-  cp -r "$PROJECT_DIR/sandbox/skills" "$BUILD_CTX/skills"
+if [ -d "$PROJECT_DIR/skills" ]; then
+  cp -r "$PROJECT_DIR/skills" "$BUILD_CTX/skills"
 fi
 
 TAGS=(-t "$APP_IMAGE" -t "$COMPAT_IMAGE")

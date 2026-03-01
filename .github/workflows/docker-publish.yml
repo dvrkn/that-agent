@@ -54,7 +54,7 @@ jobs:
           BUILD_CTX=$(mktemp -d)
           echo "BUILD_CTX=$BUILD_CTX" >> "$GITHUB_ENV"
 
-          cp sandbox/Dockerfile "$BUILD_CTX/"
+          cp Dockerfile "$BUILD_CTX/"
 
           # Mirror the minimal context used by scripts/build-and-push.sh —
           # only Cargo files and crates are needed for the Rust build stage.
@@ -68,8 +68,8 @@ jobs:
             ./ "$BUILD_CTX/"
 
           # Bake bundled skills into the image if present
-          if [ -d sandbox/skills ]; then
-            cp -r sandbox/skills "$BUILD_CTX/skills"
+          if [ -d skills ]; then
+            cp -r skills "$BUILD_CTX/skills"
           fi
 
       - name: Build and push
