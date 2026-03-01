@@ -26,6 +26,7 @@ CARGO_RELEASE_CODEGEN_UNITS="${THAT_CARGO_RELEASE_CODEGEN_UNITS:-16}"
 CARGO_RELEASE_OPT_LEVEL="${THAT_CARGO_RELEASE_OPT_LEVEL:-2}"
 CARGO_RELEASE_DEBUG="${THAT_CARGO_RELEASE_DEBUG:-0}"
 RUST_LINKER="${THAT_RUST_LINKER:-mold}"
+PLATFORMS="${THAT_BUILDX_PLATFORMS:-linux/amd64,linux/arm64}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -84,6 +85,7 @@ echo "Push endpoint:      ${REGISTRY_PUSH_ENDPOINT}"
 echo "Cargo jobs:         ${CARGO_BUILD_JOBS}"
 echo "Release tuning:     lto=${CARGO_RELEASE_LTO}, cgu=${CARGO_RELEASE_CODEGEN_UNITS}, opt=${CARGO_RELEASE_OPT_LEVEL}, debug=${CARGO_RELEASE_DEBUG}"
 echo "Rust linker:        ${RUST_LINKER}"
+echo "Platforms:          ${PLATFORMS}"
 echo "=========================================="
 
 # Create an isolated, minimal Docker build context.
@@ -188,6 +190,7 @@ if docker buildx version >/dev/null 2>&1; then
 
     docker buildx build \
       "${PUSH_ARGS[@]}" \
+      --platform "$PLATFORMS" \
       "${TAGS[@]}" \
       "${CACHE_FROM_ARGS[@]}" \
       --cache-to "type=local,dest=$CACHE_DIR,mode=max" \
@@ -204,6 +207,7 @@ if docker buildx version >/dev/null 2>&1; then
     echo "Buildx cache disabled (driver: ${BUILDX_DRIVER:-unknown})."
     docker buildx build \
       "${PUSH_ARGS[@]}" \
+      --platform "$PLATFORMS" \
       "${TAGS[@]}" \
       --build-arg "THAT_RUNTIME_PROFILE=${RUNTIME_PROFILE}" \
       --build-arg "THAT_CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}" \
