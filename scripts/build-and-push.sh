@@ -19,7 +19,6 @@ BUILDX_DRIVER_NETWORK="${THAT_BUILDX_DRIVER_NETWORK:-host}"
 BUILDX_AUTO_BOOTSTRAP="${THAT_BUILDX_AUTO_BOOTSTRAP:-1}"
 BUILDX_BOOTSTRAP_TIMEOUT="${THAT_BUILDX_BOOTSTRAP_TIMEOUT:-90}"
 REGISTRY_INSECURE_MODE="${THAT_REGISTRY_INSECURE:-auto}"
-RUNTIME_PROFILE="${THAT_RUNTIME_PROFILE:-slim}"
 CARGO_BUILD_JOBS="${THAT_CARGO_BUILD_JOBS:-0}"
 CARGO_RELEASE_LTO="${THAT_CARGO_RELEASE_LTO:-thin}"
 CARGO_RELEASE_CODEGEN_UNITS="${THAT_CARGO_RELEASE_CODEGEN_UNITS:-16}"
@@ -78,7 +77,6 @@ echo "Registry:           ${REGISTRY}"
 echo "Primary image repo: ${IMAGE_REPO}"
 echo "Compat image repo:  ${COMPAT_REPO}"
 echo "Push latest tags:   ${PUSH_LATEST}"
-echo "Runtime profile:    ${RUNTIME_PROFILE}"
 echo "Buildx driver:      ${BUILDX_CREATE_DRIVER}"
 echo "Registry insecure:  ${REGISTRY_INSECURE}"
 echo "Push endpoint:      ${REGISTRY_PUSH_ENDPOINT}"
@@ -194,7 +192,6 @@ if docker buildx version >/dev/null 2>&1; then
       "${TAGS[@]}" \
       "${CACHE_FROM_ARGS[@]}" \
       --cache-to "type=local,dest=$CACHE_DIR,mode=max" \
-      --build-arg "THAT_RUNTIME_PROFILE=${RUNTIME_PROFILE}" \
       --build-arg "THAT_CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}" \
       --build-arg "THAT_CARGO_RELEASE_LTO=${CARGO_RELEASE_LTO}" \
       --build-arg "THAT_CARGO_RELEASE_CODEGEN_UNITS=${CARGO_RELEASE_CODEGEN_UNITS}" \
@@ -209,7 +206,6 @@ if docker buildx version >/dev/null 2>&1; then
       "${PUSH_ARGS[@]}" \
       --platform "$PLATFORMS" \
       "${TAGS[@]}" \
-      --build-arg "THAT_RUNTIME_PROFILE=${RUNTIME_PROFILE}" \
       --build-arg "THAT_CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}" \
       --build-arg "THAT_CARGO_RELEASE_LTO=${CARGO_RELEASE_LTO}" \
       --build-arg "THAT_CARGO_RELEASE_CODEGEN_UNITS=${CARGO_RELEASE_CODEGEN_UNITS}" \

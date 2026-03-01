@@ -44,7 +44,6 @@ FROM moby/buildkit:v0.25.1-rootless AS buildkit-bin
 # Stage 2: Runtime
 ############################
 FROM python:3.12-slim-bookworm
-ARG THAT_RUNTIME_PROFILE=slim
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -57,23 +56,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       tini \
       sudo \
       docker.io \
-    && if [ "$THAT_RUNTIME_PROFILE" = "full" ]; then \
-      apt-get install -y --no-install-recommends \
-        build-essential \
-        rustc cargo \
-        golang \
-        nodejs npm; \
-    fi \
     && rm -rf /var/lib/apt/lists/*
 
 # fd-find installs as 'fdfind' on Debian — symlink for convenience
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
-
-# TypeScript (global install, full profile only)
-RUN if [ "$THAT_RUNTIME_PROFILE" = "full" ]; then npm install -g typescript ts-node; fi
-
-# Pre-install common Python testing/dev packages (full profile only)
-RUN if [ "$THAT_RUNTIME_PROFILE" = "full" ]; then pip install --no-cache-dir pytest hypothesis requests; fi
 
 # that binary — from builder stage (local) or pre-built via --build-context (CI)
 COPY --from=builder /build/that /usr/local/bin/that
