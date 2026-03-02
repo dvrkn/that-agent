@@ -16,6 +16,8 @@
 
 set -euo pipefail
 
+main() {
+
 # ── Colour helpers ──────────────────────────────────────────────────────────
 if [ -t 1 ]; then
   _BOLD='\033[1m'; _GREEN='\033[0;32m'; _CYAN='\033[0;36m'
@@ -465,3 +467,7 @@ echo ""
 echo "  Your overlay lives at: ${OVERLAY_DIR}"
 echo "  The secret.yaml in that directory contains your API key — keep it safe."
 echo ""
+
+}
+
+main "$@"
