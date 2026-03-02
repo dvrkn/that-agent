@@ -95,6 +95,8 @@ spec:
             allowPrivilegeEscalation: true
             seccompProfile:
               type: Unconfined
+            appArmorProfile:
+              type: Unconfined
           command: ["/bin/sh", "-lc"]
           args:
             - |
