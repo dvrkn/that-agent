@@ -385,7 +385,7 @@ else
   info "Downloading base manifests from GitHub…"
   mkdir -p "${OVERLAY_DIR}/base"
   curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/heads/main.tar.gz" | \
-    tar -xz --strip-components=3 -C "${OVERLAY_DIR}/base" "that-agent-main/deploy/k8s/base/"
+    tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-main/deploy/k8s/base/"
   ok "Base manifests downloaded."
 fi
 
