@@ -149,6 +149,24 @@ pub fn build_empty_channel_response_fallback(
     }
 }
 
+/// Memory tools are safe to re-invoke (idempotent intent); the model should
+/// still generate a user-facing confirmation after calling them.
+const MEMORY_TOOL_NAMES: &[&str] = &["mem_add", "mem_recall", "mem_compact"];
+
+fn only_memory_tool_calls(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    let calls: Vec<&str> = tool_events
+        .iter()
+        .filter_map(|ev| {
+            if let that_channels::ToolLogEvent::Call { name, .. } = ev {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    !calls.is_empty() && calls.iter().all(|n| MEMORY_TOOL_NAMES.contains(n))
+}
+
 pub fn should_retry_empty_channel_response(
     text: &str,
     suppress_output: bool,
@@ -161,8 +179,9 @@ pub fn should_retry_empty_channel_response(
     if !text.trim().is_empty() {
         return false;
     }
-    // Avoid re-running after side-effecting tool calls.
-    tool_events.is_empty()
+    // Avoid re-running after side-effecting tool calls — but memory tools are
+    // safe to re-invoke, so allow one retry to produce the user-facing response.
+    tool_events.is_empty() || only_memory_tool_calls(tool_events)
 }
 
 pub fn build_empty_channel_retry_task(task: &str) -> String {

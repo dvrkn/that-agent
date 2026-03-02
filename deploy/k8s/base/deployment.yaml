@@ -93,6 +93,10 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
             allowPrivilegeEscalation: true
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
           command: ["/bin/sh", "-lc"]
           args:
             - |
