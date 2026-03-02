@@ -1017,7 +1017,8 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
         // Events with no SSE representation.
         ChannelEvent::TypingIndicator
         | ChannelEvent::ThinkingDelta(_)
-        | ChannelEvent::Retrying { .. } => None,
+        | ChannelEvent::Retrying { .. }
+        | ChannelEvent::Reset => None,
     }
 }
 

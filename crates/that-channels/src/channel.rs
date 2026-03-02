@@ -44,6 +44,11 @@ pub enum ChannelEvent {
         name: String,
         result: String,
     },
+    /// Clear per-run adapter state (buffered tokens, in-progress tool indicators).
+    ///
+    /// Fired at the start of every agent run attempt so adapters discard any stale
+    /// state left behind by a previously aborted run targeting the same session.
+    Reset,
     /// The agent turn completed successfully.
     Done {
         text: String,

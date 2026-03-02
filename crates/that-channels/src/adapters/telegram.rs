@@ -620,6 +620,13 @@ impl Channel for TelegramAdapter {
                 // Thinking deltas are not forwarded to Telegram.
                 MessageHandle::default()
             }
+            ChannelEvent::Reset => {
+                // New run starting — discard any stale state from an aborted previous run.
+                let mut state = self.state.lock().await;
+                state.token_buffers.remove(&stream_key);
+                state.tool_status.remove(&chat_id);
+                MessageHandle::default()
+            }
             ChannelEvent::ToolCall { name, args, .. } => {
                 // Discard buffered text — it's intermediate reasoning, not user-facing output.
                 {
