@@ -400,23 +400,7 @@ pub async fn execute_agent_run_channel(
             .unwrap_or_else(|| format!("~/.that-agent/agents/{}.toml", agent.name))
     };
 
-    let gateway_addr =
-        std::env::var("THAT_GATEWAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    let gateway_url = std::env::var("THAT_GATEWAY_URL").unwrap_or_else(|_| {
-        let port = gateway_addr.rsplit(':').next().unwrap_or("8080");
-        let sandbox_mode = std::env::var("THAT_SANDBOX_MODE")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if sandbox_mode == "k8s" || sandbox_mode == "kubernetes" {
-            // In-cluster: use the K8s service name (that-agent.<namespace>.svc.cluster.local)
-            let ns = std::env::var("POD_NAMESPACE")
-                .or_else(|_| std::env::var("THAT_SANDBOX_K8S_NAMESPACE"))
-                .unwrap_or_else(|_| "default".to_string());
-            format!("http://that-agent.{ns}.svc.cluster.local:{port}")
-        } else {
-            format!("http://localhost:{port}")
-        }
-    });
+    let gateway_url = super::support::resolve_gateway_url();
     let channel_info = format!(
         "## Active Channels\n\n\
          You are communicating through the following channels: {ids}\n\

@@ -110,6 +110,14 @@ pub async fn spawn_agent(
     if let Some(port) = gateway_port {
         cmd.env("THAT_GATEWAY_ADDR", format!("127.0.0.1:{port}"));
     }
+    // Pass parent's gateway URL so the child can post notifications back.
+    cmd.env(
+        "THAT_PARENT_GATEWAY_URL",
+        crate::orchestration::support::resolve_gateway_url(),
+    );
+    if let Ok(tok) = std::env::var("THAT_GATEWAY_TOKEN") {
+        cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
+    }
     // Detach: let the child outlive the parent.
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

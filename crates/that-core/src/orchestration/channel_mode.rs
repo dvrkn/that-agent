@@ -169,6 +169,8 @@ pub async fn run_listen(
     let sessions: ChannelSessions = Arc::new(Mutex::new(HashMap::new()));
     let channel_index_lock = Arc::new(Mutex::new(()));
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
+    // Queued __notify__ messages drained each heartbeat tick.
+    let notification_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     eprintln!(
         "[that] Listening on channels: {} (primary: {})\n[that] Agent: {} — Ctrl+C to stop.",
@@ -320,6 +322,7 @@ pub async fn run_listen(
         let cluster_registry_hb = Arc::clone(&cluster_registry);
         let channel_registry_hb = Arc::clone(&channel_registry);
         let route_registry_hb = Arc::clone(&route_registry);
+        let notification_queue_hb = Arc::clone(&notification_queue);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -327,6 +330,7 @@ pub async fn run_listen(
             .join("plugins");
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_reconcile = std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(120))
                 .unwrap_or_else(std::time::Instant::now);
@@ -478,9 +482,13 @@ pub async fn run_listen(
                     unscoped_plugin_tasks.push(item);
                 }
 
+                let pending_notifs: Vec<String> =
+                    std::mem::take(&mut *notification_queue_hb.lock().await);
+
                 if due_indices.is_empty()
                     && unscoped_plugin_tasks.is_empty()
                     && scoped_plugin_tasks.is_empty()
+                    && pending_notifs.is_empty()
                 {
                     continue;
                 }
@@ -512,16 +520,27 @@ pub async fn run_listen(
 
                 let due_refs: Vec<&heartbeat::HeartbeatEntry> =
                     due_indices.iter().map(|&i| &entries[i]).collect();
-                if !due_refs.is_empty() || !unscoped_plugin_tasks.is_empty() {
-                    let mut task = if due_refs.is_empty() {
+                if !due_refs.is_empty()
+                    || !unscoped_plugin_tasks.is_empty()
+                    || !pending_notifs.is_empty()
+                {
+                    let mut task = if due_refs.is_empty() && pending_notifs.is_empty() {
                         String::from(
                             "Heartbeat check-in. Process the following plugin-triggered items:\n\n",
                         )
+                    } else if due_refs.is_empty() {
+                        String::from("Heartbeat check-in.\n\n")
                     } else {
                         heartbeat::format_heartbeat_task(&due_refs)
                     };
                     append_plugin_heartbeat_tasks(&mut task, &unscoped_plugin_tasks);
-                    if due_refs.is_empty() {
+                    if !pending_notifs.is_empty() {
+                        task.push_str("\n\n## Pending agent notifications:\n");
+                        for n in &pending_notifs {
+                            task.push_str(&format!("- {n}\n"));
+                        }
+                    }
+                    if due_refs.is_empty() && !unscoped_plugin_tasks.is_empty() {
                         task.push_str(plugin_only_notify_guidance);
                     }
 
@@ -552,6 +571,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
+                        None,
                     )
                     .await;
                 }
@@ -606,6 +626,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
+                        None,
                     )
                     .await;
                 }
@@ -632,8 +653,18 @@ pub async fn run_listen(
             let cluster_registry = Arc::clone(&cluster_registry);
             let channel_registry = Arc::clone(&channel_registry);
             let route_registry = Arc::clone(&route_registry);
+            let notification_queue = Arc::clone(&notification_queue);
 
             async move {
+                if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
+                    let mut q = notification_queue.lock().await;
+                    if q.len() < 500 {
+                        q.push(msg.text);
+                    } else {
+                        warn!("notification_queue full (500), dropping notification");
+                    }
+                    return;
+                }
                 let sender_key = format!(
                     "{}:{}:{}",
                     msg.channel_id,
@@ -905,6 +936,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&channel_registry)),
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
+                                        None,
                                     )
                                     .await;
                                     return;
@@ -938,6 +970,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&channel_registry)),
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
+                                        None,
                                     )
                                     .await;
                                     return;
@@ -978,6 +1011,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry)),
                         Some(Arc::clone(&route_registry)),
                         skill_roots,
+                        msg.callback_url,
                     )
                     .await;
                 })
@@ -1015,6 +1049,7 @@ async fn run_agent_for_sender_tracked(
     channel_registry: Option<Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
+    callback_url: Option<String>,
 ) {
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
@@ -1041,6 +1076,7 @@ async fn run_agent_for_sender_tracked(
             channel_registry,
             route_registry,
             skill_roots,
+            callback_url,
         )
         .await;
     });
@@ -1090,6 +1126,7 @@ async fn run_agent_for_sender(
     channel_registry: Option<Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
+    callback_url: Option<String>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
     impl TypingTaskGuard {
@@ -1318,6 +1355,38 @@ async fn run_agent_for_sender(
 
     match run_result {
         Ok((text, tool_events)) => {
+            // If the agent called mem_compact, reset in-memory history to a compact anchor
+            // so images and old turns are evicted from context — identical to /compact command.
+            let compact_summary = tool_events.iter().find_map(|ev| {
+                if let that_channels::ToolLogEvent::Call { name, args } = ev {
+                    if name == "mem_compact" {
+                        return serde_json::from_str::<serde_json::Value>(args)
+                            .ok()
+                            .and_then(|v| v.get("summary")?.as_str().map(String::from));
+                    }
+                }
+                None
+            });
+            if let Some(ref summary) = compact_summary {
+                history = vec![
+                    Message::user(format!("[Conversation context summary: {summary}]")),
+                    Message::assistant(
+                        "Understood, I have the context from our previous conversation."
+                            .to_string(),
+                    ),
+                ];
+                let _ = session_mgr.append(
+                    &session_id,
+                    &TranscriptEntry {
+                        timestamp: Utc::now(),
+                        run_id: run_id.clone(),
+                        event: TranscriptEvent::Compaction {
+                            summary: summary.clone(),
+                        },
+                    },
+                );
+            }
+
             // Log tool calls and results before the final assistant message so the
             // transcript reads in execution order: input → tools → output.
             for ev in tool_events {
@@ -1363,6 +1432,17 @@ async fn run_agent_for_sender(
             info!(channel = %channel_id, "<<< {text}");
             history.push(Message::user(&task_for_model));
             history.push(Message::assistant(&text));
+            if let Some(url) = callback_url {
+                let t = text.clone();
+                tokio::spawn(async move {
+                    let _ = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({ "text": t }))
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send()
+                        .await;
+                });
+            }
             let _ = session_mgr.append(
                 &session_id,
                 &TranscriptEntry {

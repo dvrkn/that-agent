@@ -318,6 +318,20 @@ impl LoopHook for ChannelHook {
 
         match name {
             "human_ask" => {
+                // Background/heartbeat runs (suppress_streaming = true, no channel_id) must
+                // not register a pending ask — doing so would create a wildcard that silently
+                // consumes subsequent user messages, breaking any ongoing user conversation.
+                if self.suppress_streaming {
+                    let result_json = serde_json::json!({
+                        "response": "human_ask is unavailable in background runs",
+                        "approved": false,
+                        "method": "channel_hook",
+                        "elapsed_ms": 0,
+                    })
+                    .to_string();
+                    return HookAction::Skip { result_json };
+                }
+
                 let message = serde_json::from_str::<serde_json::Value>(args_json)
                     .ok()
                     .and_then(|v| v.get("message")?.as_str().map(String::from))

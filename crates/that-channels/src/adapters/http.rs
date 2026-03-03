@@ -32,6 +32,10 @@ use crate::channel::{
 };
 use crate::config::AdapterConfig;
 
+/// Sentinel `sender_id` for zero-cost sub-agent notifications.
+/// Must match the check in the orchestrator's inbound router.
+pub const NOTIFY_SENDER_ID: &str = "__notify__";
+
 // ─── Request / Response Types ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +57,12 @@ struct ChatResponse {
 struct RespondRequest {
     request_id: String,
     response: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NotifyRequest {
+    message: String,
+    agent: Option<String>,
 }
 
 /// A single base64-encoded attachment in an inbound webhook request.
@@ -257,6 +267,7 @@ impl Channel for HttpAdapter {
             .route("/v1/chat/stream", post(handle_chat_stream))
             .route("/v1/chat/respond", post(handle_chat_respond))
             .route("/v1/inbound", post(handle_inbound))
+            .route("/v1/notify", post(handle_notify))
             .route("/v1/schema", get(handle_schema))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -711,16 +722,9 @@ async fn handle_inbound(
         }
     }
 
-    let inbound_tx = state.inbound_tx.lock().await;
-    let tx = match inbound_tx.as_ref() {
-        Some(tx) => tx,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Inbound listener not yet registered" })),
-            )
-                .into_response();
-        }
+    let tx = match acquire_inbound_tx(&state).await {
+        Ok(tx) => tx,
+        Err(resp) => return resp,
     };
 
     // Decode base64 attachments into InboundAttachment variants.
@@ -817,7 +821,67 @@ async fn handle_schema() -> impl IntoResponse {
     }))
 }
 
+/// POST /v1/notify — zero-cost event sink for sub-agent status reports.
+///
+/// Queues a notification with `sender_id = "__notify__"`. No LLM turn fires;
+/// the orchestrator batches these into the next heartbeat tick.
+async fn handle_notify(
+    State(state): State<Arc<HttpState>>,
+    Json(body): Json<NotifyRequest>,
+) -> Response {
+    let tx = match acquire_inbound_tx(&state).await {
+        Ok(tx) => tx,
+        Err(resp) => return resp,
+    };
+
+    let sender = body.agent.as_deref().unwrap_or("unknown");
+    let msg = InboundMessage {
+        channel_id: state.adapter_id.clone(),
+        sender_id: NOTIFY_SENDER_ID.to_string(),
+        text: format!("[{}] {}", sender, body.message),
+        message_id: None,
+        conversation_id: None,
+        session_hint: None,
+        attachments: vec![],
+        callback_url: None,
+        metadata: None,
+    };
+
+    if tx.send(msg).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Inbound channel closed" })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "queued" })),
+    )
+        .into_response()
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Clone the inbound sender, or return a 503 Response if the listener is not registered.
+async fn acquire_inbound_tx(
+    state: &HttpState,
+) -> Result<mpsc::UnboundedSender<InboundMessage>, Response> {
+    state
+        .inbound_tx
+        .lock()
+        .await
+        .as_ref()
+        .map(|tx| tx.clone())
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Inbound listener not yet registered" })),
+            )
+                .into_response()
+        })
+}
 
 /// Push an InboundMessage to the agent via the stored inbound_tx.
 async fn push_inbound(

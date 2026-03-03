@@ -38,7 +38,9 @@ pub fn atomic_write_json<T: serde::Serialize + ?Sized>(
     Ok(())
 }
 
-pub use adapters::{DynamicRoute, DynamicRouteRegistry, GatewayChannelAdapter, RouteHandler};
+pub use adapters::{
+    DynamicRoute, DynamicRouteRegistry, GatewayChannelAdapter, RouteHandler, NOTIFY_SENDER_ID,
+};
 pub use channel::{
     BotCommand, Channel, ChannelCapabilities, ChannelEvent, ChannelRef, InboundAttachment,
     InboundMessage, MessageHandle, OutboundTarget,

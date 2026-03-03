@@ -11,6 +11,30 @@ use crate::workspace;
 
 use super::execution::api_key_for_provider;
 
+/// Resolve this agent's public gateway URL from environment variables.
+///
+/// Resolution order:
+/// 1. `THAT_GATEWAY_URL` — explicit override (used by callers that already know the URL)
+/// 2. K8s cluster-local service name when `THAT_SANDBOX_MODE` is `k8s`/`kubernetes`
+/// 3. `http://localhost:<port>` derived from `THAT_GATEWAY_ADDR`
+pub fn resolve_gateway_url() -> String {
+    let addr = std::env::var("THAT_GATEWAY_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    std::env::var("THAT_GATEWAY_URL").unwrap_or_else(|_| {
+        let port = addr.rsplit(':').next().unwrap_or("8080");
+        let mode = std::env::var("THAT_SANDBOX_MODE")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if mode == "k8s" || mode == "kubernetes" {
+            let ns = std::env::var("POD_NAMESPACE")
+                .or_else(|_| std::env::var("THAT_SANDBOX_K8S_NAMESPACE"))
+                .unwrap_or_else(|_| "default".to_string());
+            format!("http://that-agent.{ns}.svc.cluster.local:{port}")
+        } else {
+            format!("http://localhost:{port}")
+        }
+    })
+}
+
 /// Load all workspace files for the current mode (sandbox or local).
 pub fn load_workspace_files(agent: &AgentDef, sandbox: bool) -> workspace::WorkspaceFiles {
     if sandbox {

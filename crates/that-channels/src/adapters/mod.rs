@@ -22,7 +22,7 @@ pub mod telegram;
 
 pub use gateway::GatewayChannelAdapter;
 pub use gateway_routes::{DynamicRoute, DynamicRouteRegistry, RouteHandler};
-pub use http::HttpAdapter;
+pub use http::{HttpAdapter, NOTIFY_SENDER_ID};
 pub use telegram::TelegramAdapter;
 
 /// Validate a callback URL for SSRF safety.

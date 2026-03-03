@@ -32,7 +32,7 @@ use anyhow::Result;
 use std::{collections::HashMap, sync::Arc};
 use that_tools::ThatToolsConfig;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::tools::typed::dispatch as dispatch_tool;
 
@@ -52,6 +52,9 @@ const TOOL_LOG_PREVIEW_CHARS: usize = 120;
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Minimum consecutive base64-alphabet chars to flag a blob.
 const BASE64_BLOB_MIN_LEN: usize = 1_000;
+/// Input-token threshold at which the orchestrator warns the agent to compact.
+/// At this point the context is large enough that a long response risks truncation.
+const CONTEXT_WARN_TOKENS: u32 = 150_000;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -357,6 +360,22 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                 content,
                 images: tool_images,
             });
+        }
+
+        // If context is getting large, warn the agent before its next turn so it
+        // calls mem_compact proactively — preventing response truncation mid-tool-call.
+        if usage.input_tokens > CONTEXT_WARN_TOKENS {
+            warn!(
+                input_tokens = usage.input_tokens,
+                threshold = CONTEXT_WARN_TOKENS,
+                "Context approaching limit — injecting mem_compact reminder"
+            );
+            messages.push(Message::user(
+                "<system-reminder>\ncontext_pressure: high\n\
+                 Your context window is nearly full. Call mem_compact NOW as your first \
+                 action this turn to preserve the session before the window fills and \
+                 responses get truncated.\n</system-reminder>",
+            ));
         }
 
         debug!(turn = turn + 1, "Loop turn complete, continuing");

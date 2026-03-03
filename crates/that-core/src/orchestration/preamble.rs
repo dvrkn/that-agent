@@ -440,7 +440,28 @@ pub fn build_preamble(
          Use the `agent-worktree` skill for the full orchestration guide.\n\n\
          For remote agent communication, use `shell_exec` with \
          `that run query --remote <url> --token <token> \"<task>\"` to send tasks \
-         to agents running HTTP gateway channels.\n\n",
+         to agents running HTTP gateway channels.\n\n\
+         ### Sub-agent communication protocol\n\n\
+         When a sub-agent needs to reach its parent it has two paths:\n\n\
+         **Status report (fire-and-forget, no LLM turn triggered):**\n\
+         ```\n\
+         POST $THAT_PARENT_GATEWAY_URL/v1/notify\n\
+         Authorization: Bearer $THAT_PARENT_GATEWAY_TOKEN\n\
+         {\"message\": \"<status text>\", \"agent\": \"<your-name>\"}\n\
+         ```\n\
+         The notification is queued and surfaced at the parent's next heartbeat tick — \
+         it does NOT interrupt an ongoing user conversation or consume API quota.\n\n\
+         **Async request (triggers parent LLM turn, response delivered to callback):**\n\
+         ```\n\
+         POST $THAT_PARENT_GATEWAY_URL/v1/inbound\n\
+         Authorization: Bearer $THAT_PARENT_GATEWAY_TOKEN\n\
+         {\"message\": \"<task>\", \"sender_id\": \"<your-name>\", \
+         \"callback_url\": \"http://<your-gateway>/v1/inbound\"}\n\
+         ```\n\
+         The parent processes the request as a full agent run and POSTs \
+         `{\"text\": \"<response>\"}` back to your `callback_url`.\n\n\
+         Use `/v1/notify` for progress updates. Use `/v1/inbound` + `callback_url` only \
+         when you genuinely need the parent to reason and respond.\n\n",
     );
 
     // ── 11.6. Agent Hierarchy — parent/child context ─────────────────────────
@@ -449,7 +470,13 @@ pub fn build_preamble(
             "### Agent Hierarchy\n\
              - **Parent agent**: {parent}\n\
              - You were spawned by your parent to handle a specific task or domain.\n\
-             - Focus on your assigned scope. Report results back via your channel.\n"
+             - Focus on your assigned scope. Report results back via your channel.\n\
+             - `$THAT_PARENT_GATEWAY_URL` — your parent's HTTP gateway base URL\n\
+             - `$THAT_PARENT_GATEWAY_TOKEN` — bearer token for that gateway (if auth is on)\n\
+             - Use `POST $THAT_PARENT_GATEWAY_URL/v1/notify` for status updates (zero-cost, \
+             no LLM turn on the parent side, batched into the next heartbeat).\n\
+             - Use `POST $THAT_PARENT_GATEWAY_URL/v1/inbound` with a `callback_url` when \
+             you need the parent to reason and reply asynchronously.\n"
         ));
         if let Some(role) = &agent.role {
             preamble.push_str(&format!("- **Your role**: {role}\n"));
@@ -463,6 +490,8 @@ pub fn build_preamble(
              - Each subagent gets its own isolated workspace unless `--inherit-workspace` is set\n\
              - Use `--parent <your-name> --role <role>` when spawning to establish hierarchy\n\
              - Query subagents via `that run query --remote <url> --token <token> \"<task>\"`\n\
+             - Sub-agents automatically receive `THAT_PARENT_GATEWAY_URL` pointing to your \
+             gateway — they will use it for `/v1/notify` (status) and `/v1/inbound` (async tasks)\n\
              - Use worktree tools to coordinate code changes across agents\n\
              - Store orchestration learnings in memory for team evolution\n\n\
              Use the `agent-orchestrator` skill for the full multi-agent coordination guide.\n\n",
