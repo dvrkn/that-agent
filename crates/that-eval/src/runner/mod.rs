@@ -95,7 +95,18 @@ impl ScenarioRunner {
         // Build preamble once (skills may change during the run due to create_skill,
         // but we rebuild per-prompt step to pick up any new skills).
         let workspace = self.resolve_workspace(&agent)?;
-        let container = prepare_container(&agent, &workspace, scenario.sandbox).await?;
+        if scenario.sandbox {
+            println!("Sandbox  : preparing container …");
+        }
+        let container = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            prepare_container(&agent, &workspace, scenario.sandbox),
+        )
+        .await
+        .context("Sandbox container setup timed out after 60s — is Docker running and the image built? Run: ./build.sh")??;
+        if scenario.sandbox {
+            println!("Sandbox  : ready");
+        }
 
         // Seed eval identity files so the agent starts with a real character rather
         // than the bootstrap stub.  Written once before any steps run; each prompt
@@ -130,17 +141,29 @@ impl ScenarioRunner {
         };
 
         // Execute steps
+        let total = scenario.steps.len();
         for (idx, step) in scenario.steps.iter().enumerate() {
+            let detail = step_detail_label(step);
+            println!(
+                "[{}/{}] {}{} …",
+                idx + 1,
+                total,
+                step_kind_label(step),
+                detail
+            );
             let step_wall = Instant::now();
             let result = self.execute_step(idx, step, &step_ctx).await;
             let duration_ms = step_wall.elapsed().as_millis() as u64;
 
             match result {
                 Ok(mut sr) => {
+                    let mark = if sr.success { "ok" } else { "FAIL" };
+                    println!("       → {} ({}ms)", mark, duration_ms);
                     sr.duration_ms = duration_ms;
                     self.step_results.push(sr);
                 }
                 Err(e) => {
+                    println!("       → ERR ({}ms): {e:#}", duration_ms);
                     let kind = step_kind_label(step);
                     self.step_results.push(StepResult {
                         index: idx,
@@ -681,4 +704,15 @@ fn step_kind_label(step: &Step) -> String {
         Step::Assert(_) => "assert",
     }
     .to_string()
+}
+
+/// Short contextual suffix shown after the step kind in progress output.
+fn step_detail_label(step: &Step) -> String {
+    match step {
+        Step::Prompt(p) => format!(" [{}]", p.session),
+        Step::ResetSession(r) => format!(" [{}]", r.session),
+        Step::CreateSkill(s) => format!(" ({})", s.name),
+        Step::CreateFile(f) => format!(" ({})", f.path),
+        Step::RunCommand(_) | Step::Assert(_) => String::new(),
+    }
 }

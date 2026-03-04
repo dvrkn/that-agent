@@ -7,7 +7,7 @@ use crate::agent_loop::{self, LoopConfig, Message, ToolContext};
 use crate::config::AgentDef;
 use crate::hooks::{
     channel_notify_tool_def, channel_send_file_tool_def, channel_send_message_tool_def,
-    channel_send_raw_tool_def, ChannelHook,
+    channel_send_raw_tool_def, channel_settings_tool_def, ChannelHook,
 };
 use crate::tools::all_tool_defs;
 
@@ -343,6 +343,7 @@ pub async fn execute_agent_run_channel(
     // outbound messages. Used for internal background runs (heartbeat, etc.)
     // to prevent the full agent response from being broadcast automatically.
     suppress_output: bool,
+    show_work: std::sync::Arc<std::sync::atomic::AtomicBool>,
     session_id_for_trace: Option<&str>,
     run_id_for_trace: Option<&str>,
     images: Vec<(Vec<u8>, String)>,
@@ -412,11 +413,14 @@ pub async fn execute_agent_run_channel(
          - `THAT_CONFIG_PATH={config_path}` — this agent's channel and adapter configuration file\n\n\
          ## Gateway\n\n\
          Your HTTP gateway is always listening at `{gateway_url}`.\n\
-         - `POST {gateway_url}/v1/inbound` — receive messages from bridge plugins (async, returns 202 + request_id)\n\
-         - `GET {gateway_url}/v1/schema` — introspection endpoint for bridge plugins at startup\n\
-         - `POST {gateway_url}/v1/chat` — synchronous one-shot queries\n\
+         - `POST {gateway_url}/v1/inbound` — async fire-and-forget (returns 202). Triggers a background agent run. \
+         Use this from plugins and services. Response delivered via `callback_url` or `channel_notify`.\n\
+         - `POST {gateway_url}/v1/chat` — synchronous (blocks until done). Only for one-shot queries that need inline response. \
+         Never use from plugins — it blocks the caller and makes tool calls visible on the user's channel.\n\
+         - `POST {gateway_url}/v1/notify` — zero-cost queue (returns 202). No LLM turn, batched into next heartbeat.\n\
+         - `GET {gateway_url}/v1/schema` — introspection endpoint for bridge plugins at startup.\n\
          Use `channel_register` to hot-register a bridge and `channel_list` to see active bridges.\n\
-         When building or deploying a bridge plugin, give it this gateway URL as its inbound target.",
+         When building or deploying a bridge plugin, give it this gateway URL and configure it to use `/v1/inbound` (not `/v1/chat`).",
         ids = router.channel_ids().await,
         active = active_channel,
         primary = primary_id,
@@ -489,9 +493,14 @@ pub async fn execute_agent_run_channel(
                 cid.to_string(),
                 route_target.clone(),
                 Some(log_tx),
+                std::sync::Arc::clone(&show_work),
             )
         } else {
-            ChannelHook::new(std::sync::Arc::clone(&router), Some(log_tx))
+            ChannelHook::new(
+                std::sync::Arc::clone(&router),
+                Some(log_tx),
+                std::sync::Arc::clone(&show_work),
+            )
         };
         let tools_config = load_agent_config(&container, agent);
 
@@ -502,6 +511,7 @@ pub async fn execute_agent_run_channel(
         tools.push(channel_send_file_tool_def());
         tools.push(channel_send_message_tool_def());
         tools.push(channel_send_raw_tool_def());
+        tools.push(channel_settings_tool_def());
 
         let api_key = match api_key_for_provider(&agent.provider) {
             Ok(k) => k,

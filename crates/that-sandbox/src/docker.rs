@@ -337,7 +337,8 @@ impl DockerSandboxClient {
         Ok(())
     }
 
-    pub async fn connect(agent_name: &str, workspace: &Path) -> Result<Self> {
+    /// Synchronous Docker lifecycle setup. Call via `spawn_blocking` from async contexts.
+    pub fn connect_sync(agent_name: &str, workspace: &Path) -> Result<Self> {
         let image =
             std::env::var("THAT_AGENT_SANDBOX_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
 
@@ -352,7 +353,7 @@ impl DockerSandboxClient {
             _ => {
                 anyhow::bail!(
                     "Sandbox image '{image}' not found. Build it first:\n  \
-                     cd sandbox && ./build.sh"
+                     ./build.sh"
                 );
             }
         }

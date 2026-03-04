@@ -36,7 +36,7 @@ impl BackendClient {
     pub async fn connect(agent_name: &str, workspace: &Path) -> Result<Self> {
         match SandboxMode::from_env() {
             SandboxMode::Docker => {
-                let client = DockerSandboxClient::connect(agent_name, workspace).await?;
+                let client = DockerSandboxClient::connect_sync(agent_name, workspace)?;
                 Ok(Self::Docker(client))
             }
             SandboxMode::Kubernetes => {

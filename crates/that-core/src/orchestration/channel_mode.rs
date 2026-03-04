@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,8 +37,9 @@ pub(super) struct HotState {
     pub skill_roots: Vec<std::path::PathBuf>,
 }
 
-type ChannelSessions =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, Vec<Message>)>>>;
+type ChannelSessions = Arc<
+    tokio::sync::Mutex<std::collections::HashMap<String, (String, Vec<Message>, Arc<AtomicBool>)>>,
+>;
 type PluginTaskEntry = (
     String,
     Option<String>,
@@ -165,7 +166,7 @@ pub async fn run_listen(
         skill_roots,
     }));
 
-    // Per-sender state: key = "channel_id:sender_id" → (session_id, history).
+    // Per-sender state: key = "channel_id:sender_id" → (session_id, history, show_work).
     let sessions: ChannelSessions = Arc::new(Mutex::new(HashMap::new()));
     let channel_index_lock = Arc::new(Mutex::new(()));
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
@@ -793,7 +794,14 @@ pub async fn run_listen(
                                     .unwrap_or_else(|_| "unknown".into());
                                 {
                                     let mut map = sessions.lock().await;
-                                    map.insert(sender_key.clone(), (new_sid.clone(), Vec::new()));
+                                    let sw = map
+                                        .get(&sender_key)
+                                        .map(|(_, _, sw)| Arc::clone(sw))
+                                        .unwrap_or_else(|| Arc::new(AtomicBool::new(true)));
+                                    map.insert(
+                                        sender_key.clone(),
+                                        (new_sid.clone(), Vec::new(), sw),
+                                    );
                                 }
                                 // Persist the new mapping so restarts don't resurrect old history.
                                 {
@@ -1191,10 +1199,10 @@ async fn run_agent_for_sender(
     });
     // Look up or create a session for this sender.
     // On the first message after a restart, restore context from the persisted transcript.
-    let (session_id, mut history) = {
+    let (session_id, mut history, show_work) = {
         let mut map = sessions.lock().await;
-        if let Some(existing) = map.get(&sender_key) {
-            existing.clone()
+        if let Some((sid, hist, sw)) = map.get(&sender_key) {
+            (sid.clone(), hist.clone(), Arc::clone(sw))
         } else {
             // No in-memory state — check persistent index (handles restarts / crashes).
             let channel_index = session_mgr.load_channel_sessions();
@@ -1220,8 +1228,12 @@ async fn run_agent_for_sender(
                     .unwrap_or_else(|_| "unknown".into());
                 (sid, Vec::new())
             };
-            map.insert(sender_key.clone(), (sid.clone(), hist.clone()));
-            (sid, hist)
+            let show_work = Arc::new(AtomicBool::new(true));
+            map.insert(
+                sender_key.clone(),
+                (sid.clone(), hist.clone(), Arc::clone(&show_work)),
+            );
+            (sid, hist, show_work)
         }
     };
     // Persist sender → session mapping so the next restart can recover context.
@@ -1338,6 +1350,7 @@ async fn run_agent_for_sender(
         route_channel_id,
         route_target_for_run,
         is_internal_source,
+        show_work,
         Some(&session_id),
         Some(&run_id),
         images,

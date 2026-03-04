@@ -4,6 +4,7 @@
 //! dependency: `that-core` depends on `that-channels`, so `that-channels`
 //! cannot implement `crate::agent_loop::LoopHook`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
@@ -216,6 +217,27 @@ pub fn channel_notify_tool_def() -> ToolDef {
     }
 }
 
+/// Return the `channel_settings` tool schema.
+pub fn channel_settings_tool_def() -> ToolDef {
+    ToolDef {
+        name: "channel_settings".into(),
+        description: "Adjust channel display preferences for the current conversation. \
+            Use work_visibility to control whether tool calls are shown to the user. \
+            Set to false to hide internal work (cleaner output), true to show it again."
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "work_visibility": {
+                    "type": "boolean",
+                    "description": "Whether to display tool calls and results on the channel."
+                }
+            },
+            "required": ["work_visibility"]
+        }),
+    }
+}
+
 /// A [`LoopHook`] that routes agent events to the active [`ChannelRouter`].
 ///
 /// When `channel_id` is set, events are delivered only to that channel with
@@ -232,12 +254,16 @@ pub struct ChannelHook {
     /// Optional sink for tool call/result events for session transcript logging.
     log_tx: Option<mpsc::UnboundedSender<ToolLogEvent>>,
     suppress_streaming: bool,
+    /// Per-sender preference: whether to surface tool calls/results on the channel.
+    /// Toggled via the `channel_settings` tool. Defaults to true.
+    show_work: Arc<AtomicBool>,
 }
 
 impl ChannelHook {
     pub fn new(
         router: Arc<ChannelRouter>,
         log_tx: Option<mpsc::UnboundedSender<ToolLogEvent>>,
+        show_work: Arc<AtomicBool>,
     ) -> Self {
         Self {
             router,
@@ -245,6 +271,7 @@ impl ChannelHook {
             target: None,
             log_tx,
             suppress_streaming: false,
+            show_work,
         }
     }
 
@@ -254,6 +281,7 @@ impl ChannelHook {
         channel_id: impl Into<String>,
         target: Option<OutboundTarget>,
         log_tx: Option<mpsc::UnboundedSender<ToolLogEvent>>,
+        show_work: Arc<AtomicBool>,
     ) -> Self {
         Self {
             router,
@@ -261,6 +289,7 @@ impl ChannelHook {
             target,
             log_tx,
             suppress_streaming: false,
+            show_work,
         }
     }
 
@@ -278,6 +307,7 @@ impl ChannelHook {
             target: None,
             log_tx,
             suppress_streaming: true,
+            show_work: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -536,10 +566,19 @@ impl LoopHook for ChannelHook {
                 };
                 HookAction::Skip { result_json }
             }
+            "channel_settings" => {
+                let args = serde_json::from_str::<JsonValue>(args_json).unwrap_or_default();
+                if let Some(b) = args.get("work_visibility").and_then(|v| v.as_bool()) {
+                    self.show_work.store(b, Ordering::Relaxed);
+                }
+                HookAction::Skip {
+                    result_json: serde_json::json!({ "ok": true }).to_string(),
+                }
+            }
             _ => {
                 // Surface all tool invocations to the active channel when not
-                // in a silent/background run, so users can follow along live.
-                if !self.suppress_streaming {
+                // in a silent/background run and work visibility is enabled.
+                if !self.suppress_streaming && self.show_work.load(Ordering::Relaxed) {
                     let preview = compact_args_preview(name, args_json);
                     let event = ChannelEvent::ToolCall {
                         call_id: call_id.to_string(),
@@ -572,7 +611,7 @@ impl LoopHook for ChannelHook {
 
         // Dispatch to channels so adapters that support message editing (e.g. Telegram)
         // can update the in-flight ToolCall indicator with a completion summary.
-        if !self.suppress_streaming {
+        if !self.suppress_streaming && self.show_work.load(Ordering::Relaxed) {
             let event = ChannelEvent::ToolResult {
                 call_id: call_id.to_string(),
                 name: name.to_string(),

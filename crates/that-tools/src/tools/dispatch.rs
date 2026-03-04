@@ -480,7 +480,10 @@ pub fn execute_tool(
             &config.memory,
         ) {
             Ok(result) => {
-                let budgeted = output::emit_json(&result, max_tokens);
+                // Return only the ID — echoing the full content back bloats the context
+                // and causes models to skip producing a user-facing confirmation.
+                let compact = serde_json::json!({ "stored": true, "id": result.id });
+                let budgeted = output::emit_json(&compact, max_tokens);
                 ToolResponse::from_budgeted(&budgeted)
             }
             Err(e) => ToolResponse::error(&e.to_string()),

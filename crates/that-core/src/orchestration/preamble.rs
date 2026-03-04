@@ -441,6 +441,34 @@ pub fn build_preamble(
          For remote agent communication, use `shell_exec` with \
          `that run query --remote <url> --token <token> \"<task>\"` to send tasks \
          to agents running HTTP gateway channels.\n\n\
+         ### Channel token exclusivity\n\n\
+         Each channel adapter token (e.g. a Telegram bot token, Discord bot token, Slack app token) \
+         must be used by exactly ONE agent process at a time. Never share or reuse a channel token \
+         between a parent agent and a sub-agent, or between any two concurrently running agents. \
+         Doing so will cause the primary agent's listener to freeze or drop messages, because \
+         two processes will compete for the same polling/webhook connection. \
+         Sub-agents that need their own channel presence must use a separate, dedicated token.\n\n\
+         ### Gateway endpoints — when to use which\n\n\
+         Your HTTP gateway exposes three message endpoints. Choosing the right one matters:\n\n\
+         | Endpoint | Behavior | Use when |\n\
+         |----------|----------|----------|\n\
+         | `POST /v1/inbound` | Fire-and-forget (returns 202). Triggers a background agent run. Response delivered via `callback_url` if provided, otherwise the agent uses `channel_notify`. | Plugins, services, and bridges that need the agent to act autonomously in the background. |\n\
+         | `POST /v1/chat` | Synchronous (blocks until done, returns full response). | One-shot queries where the caller needs the answer inline. |\n\
+         | `POST /v1/notify` | Zero-cost queue (returns 202). No LLM turn — batched into the next heartbeat tick. | Status reports, progress updates, fire-and-forget notifications. |\n\n\
+         **Key rule for plugins and deployed services:** When building a service that sends \
+         work to the agent (e.g. a content scanner with approve/reject buttons), always use \
+         `/v1/inbound` so the agent processes the request asynchronously in the background. \
+         Never use `/v1/chat` from a plugin — it blocks the caller until inference completes \
+         and makes tool calls visible on the user's channel, which breaks the async UX.\n\n\
+         **`/v1/inbound` request body:**\n\
+         ```json\n\
+         {\"message\": \"<task>\", \"sender_id\": \"<service-name>\", \
+         \"callback_url\": \"<optional-url-for-response>\"}\n\
+         ```\n\
+         - If `callback_url` is provided, the agent POSTs `{\"text\": \"<response>\"}` back when done.\n\
+         - If omitted, the agent uses `channel_notify` to report results on the originating channel.\n\
+         - Messages from the same `sender_id` are serialized — they queue, not run in parallel. \
+         Use distinct `sender_id` values if you need concurrent processing.\n\n\
          ### Sub-agent communication protocol\n\n\
          When a sub-agent needs to reach its parent it has two paths:\n\n\
          **Status report (fire-and-forget, no LLM turn triggered):**\n\

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::config::AgentDef;
 
@@ -31,8 +31,13 @@ impl SandboxClient {
             );
         }
 
-        let inner =
-            that_sandbox::docker::DockerSandboxClient::connect(&agent.name, workspace).await?;
+        let agent_name = agent.name.clone();
+        let workspace = workspace.to_path_buf();
+        let inner = tokio::task::spawn_blocking(move || {
+            that_sandbox::docker::DockerSandboxClient::connect_sync(&agent_name, &workspace)
+        })
+        .await
+        .context("sandbox connect task panicked")??;
         Ok(Self {
             container_name: inner.container_name,
         })
