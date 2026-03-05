@@ -141,6 +141,7 @@ The installer is interactive and sets up a production-ready single-node cluster 
 | 3 | [Tailscale Operator](https://tailscale.com/kb/1236/kubernetes-operator) | Expose cluster services to your Tailnet — no public IPs, no port forwarding | `--no-tailscale` |
 | 4 | [K9s](https://k9scli.io/) | Terminal-based Kubernetes UI for cluster inspection | `--no-k9s` |
 | — | Sub-agent RBAC | ClusterRole for namespace creation and cross-namespace orchestration | `--no-subagents` |
+| — | Cluster admin | Bind to `cluster-admin` instead of scoped ClusterRole (opt-in) | `--cluster-admin` |
 | 5 | In-cluster registry | Private container registry (NodePort) for agent-built images | always |
 | 6–9 | Agent config + deploy | Interactive prompts → Kustomize overlay → `kubectl apply` | — |
 
@@ -249,6 +250,10 @@ This is the least-privilege approach — the ClusterRole only grants the ability
 | Remove `secrets` from core resources | Agent loses ability to manage secrets for its plugins (must be pre-created by operator) |
 | Remove namespace `create`/`delete` from ClusterRole | Agent can only use pre-created namespaces for sub-agents (operator provisions them) |
 | Add label selectors to namespace management | Restrict namespace operations to only namespaces with a specific label (e.g. `that-agent/managed: "true"`) |
+
+**`--cluster-admin` mode:**
+
+For single-user VPS setups where the agent is the sole operator of the cluster, pass `--cluster-admin` to the installer. This binds the agent's ServiceAccount to the built-in `cluster-admin` ClusterRole — full unrestricted access to all resources in all namespaces. Use this when you want the agent to manage the entire cluster (install operators, configure cluster-wide resources, manage all namespaces) without RBAC friction. **Not recommended for shared or multi-tenant clusters.**
 
 Manifests: [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml) (namespace), [`deploy/k8s/base/clusterrole.yaml`](./deploy/k8s/base/clusterrole.yaml) (cluster).
 
