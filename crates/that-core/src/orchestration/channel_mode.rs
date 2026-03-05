@@ -5,7 +5,7 @@ use anyhow::Result;
 use chrono::{Local, Utc};
 use tracing::{debug, error, info, warn};
 
-use crate::agent_loop::Message;
+use crate::agent_loop::{Message, SteeringQueue};
 use crate::config::{AgentDef, WorkspaceConfig};
 use crate::heartbeat;
 use crate::session::{
@@ -54,6 +54,7 @@ pub(super) type SenderRunLocks =
 pub(super) struct ActiveSenderRun {
     run_id: u64,
     abort: tokio::task::AbortHandle,
+    steering: SteeringQueue,
 }
 pub(super) type ActiveSenderRuns =
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, ActiveSenderRun>>>;
@@ -180,13 +181,17 @@ pub async fn run_listen(
         agent.name,
     );
 
-    // Validate each channel's config (token check, connectivity) before opening listeners.
+    // Initialize immediate channels (HTTP gateway) — deferred channels (Telegram, etc.)
+    // run after the readiness probe so external API calls don't block K8s startup.
     router.initialize().await;
 
     router.start_listeners().await?;
 
-    // Signal K8s readiness — channels are initialized and listening.
+    // Signal K8s readiness — gateway is bound and listening.
     let _ = std::fs::File::create("/tmp/that-agent-ready");
+
+    // Now initialize deferred channels (external API validation: Telegram getMe, etc.).
+    router.initialize_deferred().await;
 
     // If unbootstrapped, greet on all channels so the user knows to start the ceremony.
     if ws_files.needs_bootstrap() {
@@ -329,6 +334,17 @@ pub async fn run_listen(
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join(".that-agent")
             .join("plugins");
+        // Dedicated liveness ticker — independent of heartbeat work so long-running
+        // agent runs don't starve the K8s liveness probe.
+        tokio::spawn(async {
+            let mut liveness = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                liveness.tick().await;
+                let _ = tokio::fs::File::create("/tmp/that-agent-alive").await;
+            }
+        });
+
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -337,9 +353,6 @@ pub async fn run_listen(
                 .unwrap_or_else(std::time::Instant::now);
             loop {
                 ticker.tick().await;
-
-                // Touch liveness file so K8s knows the event loop is alive.
-                let _ = tokio::fs::File::create("/tmp/that-agent-alive").await;
 
                 // Reconcile plugin deploy status every 60s.
                 if last_reconcile.elapsed() >= std::time::Duration::from_secs(60) {
@@ -573,6 +586,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -628,6 +642,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -638,8 +653,22 @@ pub async fn run_listen(
     let sender_locks = SenderRunLocks::default();
     let active_sender_runs: ActiveSenderRuns = Arc::default();
     let sender_run_seq = Arc::new(AtomicU64::new(1));
+    // ── SIGTERM / SIGINT handler ───────────────────────────────────────────
+    // Without this, K8s pod termination (SIGTERM) or OOM-adjacent kills leave
+    // no trace in logs, making crashes look "silent".
+    let shutdown_signal = async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to register SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => error!("Received SIGTERM — shutting down"),
+            _ = sigint.recv() => error!("Received SIGINT — shutting down"),
+        }
+    };
+
     let inbound_router = that_channels::InboundRouter::new(inbound_rx);
-    inbound_router
+    let inbound_loop = inbound_router
         .run_concurrent(move |msg| {
             let router = Arc::clone(&router);
             let container = container.clone();
@@ -682,7 +711,8 @@ pub async fn run_listen(
                         sender_id: Some(msg.sender_id.clone()),
                         thread_id: msg.session_hint.clone(),
                         session_id: None,
-                        reply_to_message_id: msg.message_id,
+                        reply_to_message_id: msg.message_id.clone(),
+                        request_id: msg.session_hint.clone(),
                     };
                     let stopped = stop_active_sender_run(&active_sender_runs, &sender_key).await;
                     let text = if stopped {
@@ -695,6 +725,27 @@ pub async fn run_listen(
                         .await;
                     return;
                 }
+                // ── Mid-turn steering: if a run is active for this sender,
+                // push the message as a hint instead of blocking on the lock.
+                if parsed_slash.is_none() && hot.read().await.agent.steering {
+                    let steering_arc = {
+                        let runs = active_sender_runs.lock().await;
+                        runs.get(&sender_key).map(|r| Arc::clone(&r.steering))
+                    };
+                    if let Some(q) = steering_arc {
+                        q.lock().await.push(msg.text);
+                        debug!(sender = %sender_key, "Enqueued steering hint for active run");
+                        // Visual acknowledgment — fire-and-forget so we don't block on Telegram API.
+                        if let Some(mid) = msg.message_id.clone() {
+                            let r = Arc::clone(&router);
+                            let ch = msg.channel_id.clone();
+                            let chat = msg.conversation_id.clone().unwrap_or_default();
+                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}").await });
+                        }
+                        return;
+                    }
+                }
+
                 let sender_lock = {
                     let mut locks = sender_locks.lock().await;
                     locks
@@ -712,7 +763,8 @@ pub async fn run_listen(
                         sender_id: Some(msg.sender_id.clone()),
                         thread_id: msg.session_hint.clone(),
                         session_id: None,
-                        reply_to_message_id: msg.message_id,
+                        reply_to_message_id: msg.message_id.clone(),
+                        request_id: msg.session_hint.clone(),
                     };
 
                     // Snapshot the current hot state for this message.
@@ -1027,8 +1079,16 @@ pub async fn run_listen(
                 drop(sender_guard);
                 evict_sender_lock_if_idle(&sender_locks, &sender_key, &sender_lock).await;
             }
-        })
-        .await;
+        });
+
+    tokio::select! {
+        _ = inbound_loop => {
+            error!("Inbound message loop exited unexpectedly — all channel senders dropped?");
+        }
+        _ = shutdown_signal => {
+            // Logged inside the signal handler above.
+        }
+    }
 
     Ok(())
 }
@@ -1040,7 +1100,7 @@ async fn run_agent_for_sender_tracked(
     channel_id: String,
     sender_id: String,
     conversation_id: Option<String>,
-    message_id: Option<i64>,
+    message_id: Option<String>,
     session_hint: Option<String>,
     sender_key: String,
     sessions: ChannelSessions,
@@ -1062,6 +1122,8 @@ async fn run_agent_for_sender_tracked(
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
     let sender_key_for_cleanup = sender_key.clone();
+    let steering: SteeringQueue = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let steering_for_task = Arc::clone(&steering);
 
     let run_task = tokio::spawn(async move {
         run_agent_for_sender(
@@ -1085,6 +1147,7 @@ async fn run_agent_for_sender_tracked(
             route_registry,
             skill_roots,
             callback_url,
+            Some(steering_for_task),
         )
         .await;
     });
@@ -1096,6 +1159,7 @@ async fn run_agent_for_sender_tracked(
             ActiveSenderRun {
                 run_id: active_run_id,
                 abort: abort_handle,
+                steering,
             },
         );
     }
@@ -1119,7 +1183,7 @@ async fn run_agent_for_sender(
     channel_id: String,
     sender_id: String,
     conversation_id: Option<String>,
-    message_id: Option<i64>,
+    message_id: Option<String>,
     session_hint: Option<String>,
     sender_key: String,
     sessions: ChannelSessions,
@@ -1135,6 +1199,7 @@ async fn run_agent_for_sender(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    steering: Option<SteeringQueue>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
     impl TypingTaskGuard {
@@ -1158,21 +1223,24 @@ async fn run_agent_for_sender(
         sender_id: Some(sender_id.clone()),
         thread_id: session_hint.clone(),
         session_id: None,
-        reply_to_message_id: message_id,
+        reply_to_message_id: message_id.clone(),
+        request_id: session_hint.clone(),
     };
 
     // Immediately acknowledge the message so the user knows the agent is working.
     // Skip for internal heartbeat sources.
     let mut typing_task = TypingTaskGuard(if !is_internal_source {
-        // React to the user's message with 👀 so they know the agent saw it.
+        // React to the user's message with 👀 — fire-and-forget so the agent
+        // run starts immediately without waiting for the Telegram API round-trip.
         if let Some(mid) = message_id {
             let react_chat = base_target
                 .recipient_id
                 .as_deref()
-                .unwrap_or(sender_id.as_str());
-            router
-                .react_to_message(&channel_id, react_chat, mid, "👀")
-                .await;
+                .unwrap_or(sender_id.as_str())
+                .to_string();
+            let r = Arc::clone(&router);
+            let ch = channel_id.clone();
+            tokio::spawn(async move { r.react_to_message(&ch, &react_chat, &mid, "👀").await });
         }
         // Send typing indicator immediately and refresh every 4s while the agent runs.
         // Telegram's "typing" action expires after ~5s, so 4s keeps it alive.
@@ -1340,6 +1408,7 @@ async fn run_agent_for_sender(
     } else {
         Some(route_target.clone())
     };
+    let steering_for_run = steering.filter(|_| agent.steering);
     let run_result = execute_agent_run_channel(
         &agent,
         container,
@@ -1358,6 +1427,7 @@ async fn run_agent_for_sender(
         channel_registry,
         route_registry,
         skill_roots,
+        steering_for_run,
     )
     .await;
 

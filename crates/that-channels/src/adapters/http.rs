@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -119,6 +119,8 @@ struct HttpState {
     request_timeout_secs: u64,
     /// Path to the dynamic route registry file, if configured.
     route_registry_path: Option<PathBuf>,
+    /// File path for persisting the bearer token across restarts.
+    token_file: Option<PathBuf>,
 }
 
 // ─── HTTP Gateway Adapter ────────────────────────────────────────────────────
@@ -166,8 +168,18 @@ impl HttpAdapter {
         auth_token: Option<String>,
         request_timeout_secs: u64,
     ) -> Self {
+        // Derive a token file path for persisting paired tokens across restarts.
+        let token_file = dirs::home_dir().map(|h| {
+            let dir = h.join(".that-agent");
+            dir.join(format!("gateway_token_{id}"))
+        });
+
         let (resolved_token, pairing) = if let Some(tok) = auth_token {
             // Pre-configured token — no pairing needed.
+            (Some(tok), None)
+        } else if let Some(tok) = token_file.as_deref().and_then(load_persisted_token) {
+            // Previously paired token found on disk — reuse it.
+            info!("Gateway restored paired token from disk");
             (Some(tok), None)
         } else {
             // Generate pairing code + token; auth enforced after pairing.
@@ -196,6 +208,7 @@ impl HttpAdapter {
             pairing: Mutex::new(pairing),
             request_timeout_secs,
             route_registry_path: None,
+            token_file,
         });
 
         Self {
@@ -236,7 +249,9 @@ impl Channel for HttpAdapter {
             inbound_images: true,
             inbound_audio: true,
             rich_messages: false,
+            reactions: false,
             native_api: false,
+            deferred_start: false,
         }
     }
 
@@ -322,7 +337,7 @@ impl Channel for HttpAdapter {
         event: &ChannelEvent,
         target: Option<&OutboundTarget>,
     ) -> Result<MessageHandle> {
-        let request_id = target.and_then(|t| t.thread_id.as_deref()).unwrap_or("");
+        let request_id = target.and_then(|t| t.request_id.as_deref()).unwrap_or("");
 
         if request_id.is_empty() {
             // No target request — cannot route the event.
@@ -355,8 +370,8 @@ impl Channel for HttpAdapter {
         target: Option<&OutboundTarget>,
     ) -> Result<String> {
         let request_id = target
-            .and_then(|t| t.thread_id.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("HTTP ask_human: no request_id in target.thread_id"))?;
+            .and_then(|t| t.request_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("HTTP ask_human: no request_id in target"))?;
 
         let timeout_secs = timeout.unwrap_or(self.request_timeout_secs);
 
@@ -408,6 +423,24 @@ impl Channel for HttpAdapter {
         *guard = Some(tx);
         info!(channel = %self.id, "HTTP inbound listener registered");
         Ok(())
+    }
+}
+
+// ─── Token Persistence ───────────────────────────────────────────────────────
+
+fn load_persisted_token(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn persist_token(path: &Path, token: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(path, token) {
+        warn!("Failed to persist gateway token to {}: {e}", path.display());
     }
 }
 
@@ -496,6 +529,11 @@ async fn handle_pair(
     let mut guard = state.auth_token.write().await;
     *guard = Some(token.clone());
     drop(guard);
+
+    // Persist the token so it survives restarts.
+    if let Some(ref path) = state.token_file {
+        persist_token(path, &token);
+    }
 
     info!("Gateway paired successfully");
 

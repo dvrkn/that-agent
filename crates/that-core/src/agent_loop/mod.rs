@@ -47,6 +47,12 @@ const TRACE_PREVIEW_CHARS: usize = 400;
 const TRACE_LLM_IO_CHARS: usize = 4_000;
 /// Max chars logged for tool call args/results in app logs (compact single-line).
 const TOOL_LOG_PREVIEW_CHARS: usize = 120;
+/// Prefix injected into steering hint messages so the LLM can identify them.
+pub const STEERING_HINT_PREFIX: &str = "[hint]:";
+
+/// Shared type for the optional mid-run steering queue.
+pub type SteeringQueue = Arc<Mutex<Vec<String>>>;
+
 /// Hard ceiling on tool result chars allowed into conversation context.
 /// ~8K tokens at ~4 chars/token. Generous for structured data, fatal for base64.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
@@ -95,6 +101,8 @@ pub struct LoopConfig {
     pub tool_ctx: ToolContext,
     /// Images to attach to the current turn's user message (data, mime_type).
     pub images: Vec<(Vec<u8>, String)>,
+    /// Optional steering queue: mid-run hints from the human, drained each turn.
+    pub steering: Option<SteeringQueue>,
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -118,15 +126,48 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             None
         };
 
+    // Turn-budget thresholds — loop-invariant.
+    let budget_half = config.max_turns / 2;
+    let budget_eighty = config.max_turns * 4 / 5;
+
     for turn in 0..config.max_turns {
+        // Drain steering hints queued by the human between turns.
+        if let Some(ref queue) = config.steering {
+            let hints: Vec<String> = {
+                let mut q = queue.lock().await;
+                q.drain(..).collect()
+            };
+            if !hints.is_empty() {
+                let merged = hints.join("\n");
+                messages.push(Message::user(format!("{STEERING_HINT_PREFIX} {merged}")));
+                hook.on_steering_picked_up().await;
+                debug!("Injected {} steering hint(s)", hints.len());
+            }
+        }
+
+        // ── Turn-budget reminders ────────────────────────────────────────────
+        // Inject a lightweight system reminder at 50% and 80% of max_turns so the
+        // agent has a live signal of how many turns remain — the baked-in preamble
+        // instruction gets buried under tool history in long runs.
+        let current = turn + 1;
+        if config.max_turns >= 10 && (current == budget_half || current == budget_eighty) {
+            let remaining = config.max_turns - current;
+            messages.push(Message::user(format!(
+                "<system-reminder>\nturn_budget: {current}/{} — {remaining} turns remaining. \
+                 Prioritize completing the current objective. If you have open tasks, \
+                 focus on finishing them before starting new work.\n</system-reminder>",
+                config.max_turns
+            )));
+        }
+
         info!(
-            turn = turn + 1,
+            turn = current,
             max_turns = config.max_turns,
             provider = %config.provider,
             model = %config.model,
-            ">>> turn {}/{}", turn + 1, config.max_turns
+            ">>> turn {current}/{}", config.max_turns
         );
-        let turn_input_preview = llm_input_preview(config, &messages, turn + 1);
+        let turn_input_preview = llm_input_preview(config, &messages, current);
 
         // ── LLM request span ─────────────────────────────────────────────────
         // Emit both GenAI semantic-convention attributes and OpenInference
@@ -139,7 +180,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             gen_ai.provider.name = %config.provider,
             gen_ai.request.model = %config.model,
             gen_ai.operation.name = "chat",
-            turn = turn + 1,
+            turn = current,
             gen_ai.prompt = %turn_input_preview,
             gen_ai.completion = tracing::field::Empty,
             llm.provider = %config.provider,
@@ -191,14 +232,13 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         total_usage = total_usage.add(&usage);
         if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
             info!(
-                turn = turn + 1,
+                turn = current,
                 tool_calls = tool_calls.len(),
                 in_tok = usage.input_tokens,
                 out_tok = usage.output_tokens,
                 cache_read = usage.cache_read_tokens,
                 cache_write = usage.cache_write_tokens,
-                "<<< turn {}/{} calls={} tok={}/{} cache=r:{}/w:{}",
-                turn + 1,
+                "<<< turn {current}/{} calls={} tok={}/{} cache=r:{}/w:{}",
                 config.max_turns,
                 tool_calls.len(),
                 usage.input_tokens,
@@ -208,12 +248,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             );
         } else {
             info!(
-                turn = turn + 1,
+                turn = current,
                 tool_calls = tool_calls.len(),
                 in_tok = usage.input_tokens,
                 out_tok = usage.output_tokens,
-                "<<< turn {}/{} calls={} tok={}/{}",
-                turn + 1,
+                "<<< turn {current}/{} calls={} tok={}/{}",
                 config.max_turns,
                 tool_calls.len(),
                 usage.input_tokens,
@@ -378,7 +417,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             ));
         }
 
-        debug!(turn = turn + 1, "Loop turn complete, continuing");
+        debug!(turn = current, "Loop turn complete, continuing");
     }
 
     Err(anyhow::anyhow!("max turns ({}) reached", config.max_turns))
