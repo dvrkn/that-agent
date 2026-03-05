@@ -198,6 +198,15 @@ if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
   if [[ -z "${TS_CLIENT_ID}" || -z "${TS_CLIENT_SECRET}" ]]; then
     warn "Missing Tailscale OAuth credentials — skipping operator install."
   else
+    echo ""
+    echo "  Tailnet name (e.g. 'myteam' from myteam.ts.net)."
+    echo "  Used so the agent can construct mesh URLs directly without discovery."
+    echo ""
+    TS_TAILNET_NAME="${TS_TAILNET_NAME:-}"
+    if [[ -z "${TS_TAILNET_NAME}" ]]; then
+      read -rp "  Tailnet name (optional, press Enter to skip): " TS_TAILNET_NAME < /dev/tty
+    fi
+
     helm repo add tailscale https://pkgs.tailscale.com/helmcharts 2>/dev/null || true
     helm repo update tailscale
     helm upgrade --install tailscale-operator tailscale/tailscale-operator \
@@ -541,6 +550,7 @@ data:
   THAT_CLUSTER_BACKEND: "kubernetes"
   THAT_CLUSTER_CNI: "$(if [[ "${INSTALL_CILIUM}" == "true" ]]; then echo cilium; else echo flannel; fi)"
   THAT_CLUSTER_TAILSCALE: "${INSTALL_TAILSCALE_OPERATOR}"
+  THAT_CLUSTER_TAILNET_NAME: "${TS_TAILNET_NAME:-}"
   THAT_CLUSTER_K9S: "${INSTALL_K9S}"
 EOF
 

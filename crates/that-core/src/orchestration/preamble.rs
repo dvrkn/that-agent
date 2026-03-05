@@ -37,9 +37,16 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
             let tailscale = std::env::var("THAT_CLUSTER_TAILSCALE").unwrap_or_default();
             let mut infra = String::new();
             if tailscale == "true" {
-                infra.push_str(
-                    "                     - **Tailscale**: available — load `read_skill cluster-management tailscale-docker` for mesh exposure.\n"
-                );
+                let tailnet = std::env::var("THAT_CLUSTER_TAILNET_NAME").unwrap_or_default();
+                if tailnet.is_empty() {
+                    infra.push_str(
+                        "                     - **Tailscale**: available — load `read_skill cluster-management tailscale-docker` for mesh exposure.\n"
+                    );
+                } else {
+                    infra.push_str(&format!(
+                        "                     - **Tailscale**: available — tailnet: `{tailnet}.ts.net` — mesh URLs follow `https://<hostname>.{tailnet}.ts.net`. Load `read_skill cluster-management tailscale-docker` for details.\n"
+                    ));
+                }
             }
             let skill_hint = "                     - **Cluster management skill**: Use `read_skill cluster-management` for networking and operational patterns. \
                      Load Docker-specific references (networking-docker, operations-docker) for detailed guidance.\n\n";
@@ -82,9 +89,16 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                 ));
             }
             if tailscale == "true" {
-                infra.push_str(
-                    "                 - **Tailscale Operator**: installed — load `read_skill cluster-management tailscale-k8s` for mesh exposure.\n"
-                );
+                let tailnet = std::env::var("THAT_CLUSTER_TAILNET_NAME").unwrap_or_default();
+                if tailnet.is_empty() {
+                    infra.push_str(
+                        "                 - **Tailscale Operator**: installed — load `read_skill cluster-management tailscale-k8s` for mesh exposure.\n"
+                    );
+                } else {
+                    infra.push_str(&format!(
+                        "                 - **Tailscale Operator**: installed — tailnet: `{tailnet}.ts.net` — mesh URLs follow `https://<hostname>.{tailnet}.ts.net`. Load `read_skill cluster-management tailscale-k8s` for details.\n"
+                    ));
+                }
             }
             if k9s == "true" {
                 infra.push_str(
