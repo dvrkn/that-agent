@@ -158,9 +158,13 @@ if [[ "${INSTALL_CILIUM}" == "true" ]]; then
     ok "Cilium CLI installed."
   fi
 
-  info "Installing Cilium into the cluster…"
-  cilium install --wait
-  ok "Cilium CNI is ready."
+  if cilium status --wait --wait-duration=5s &>/dev/null; then
+    ok "Cilium is already running in the cluster."
+  else
+    info "Installing Cilium into the cluster…"
+    cilium install --wait
+    ok "Cilium CNI is ready."
+  fi
 else
   info "Skipping Cilium CNI (--no-cilium)."
 fi
