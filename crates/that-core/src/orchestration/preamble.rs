@@ -275,9 +275,7 @@ pub fn build_preamble(
             preamble.push('\n');
         }
     } else {
-        preamble.push_str(
-            "> Memory store is empty. Your Agents.md describes how to use it.\n",
-        );
+        preamble.push_str("> Memory store is empty. Your Agents.md describes how to use it.\n");
     }
     preamble.push('\n');
 

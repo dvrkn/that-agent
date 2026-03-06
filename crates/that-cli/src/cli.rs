@@ -97,6 +97,12 @@ pub enum Commands {
         command: AgentCommands,
     },
 
+    /// Evaluation harness for agent scenarios.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommands,
+    },
+
     /// Tool layer commands grouped under a single namespace.
     Tools {
         #[command(subcommand)]
@@ -509,5 +515,64 @@ pub enum AgentCommands {
     Plugin {
         #[command(subcommand)]
         command: PluginCommands,
+    },
+}
+
+/// Eval commands grouped under `that eval`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum EvalCommands {
+    /// Run a single scenario file.
+    Run {
+        /// Path to the scenario TOML file.
+        scenario: PathBuf,
+        /// Skip the LLM judge step.
+        #[arg(long)]
+        no_judge: bool,
+        /// Fail if any step errors.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        fail_on_step_error: bool,
+        /// Minimum assertion pass percentage.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+        min_assertion_pass_pct: u8,
+        /// Minimum judge score (0-100).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=100))]
+        min_judge_score: Option<u32>,
+    },
+    /// Run all scenarios in a directory.
+    RunAll {
+        /// Directory containing scenario TOML files.
+        #[arg(default_value = "evals/scenarios")]
+        dir: PathBuf,
+        /// Filter by tags (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Skip the LLM judge step.
+        #[arg(long)]
+        no_judge: bool,
+        /// Fail if any step errors.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        fail_on_step_error: bool,
+        /// Minimum assertion pass percentage.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+        min_assertion_pass_pct: u8,
+        /// Minimum judge score (0-100).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=100))]
+        min_judge_score: Option<u32>,
+    },
+    /// Display a saved eval report.
+    Report {
+        /// Run ID.
+        run_id: String,
+        /// Output format.
+        #[arg(long, default_value = "markdown")]
+        format: that_eval::cli::ReportFormat,
+    },
+    /// List past eval runs.
+    List,
+    /// List available scenarios in a directory.
+    ListScenarios {
+        /// Directory to scan.
+        #[arg(default_value = "evals/scenarios")]
+        dir: PathBuf,
     },
 }

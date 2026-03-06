@@ -25,6 +25,7 @@ code-analysis = ["that-tools/code-analysis"]
 that-tools = { path = "../that-tools", version = "0.2.0", default-features = false }
 that-core = { path = "../that-core", version = "0.2.0", default-features = false }
 that-plugins = { path = "../that-plugins", version = "0.2.0" }
+that-eval = { path = "../that-eval", version = "0.2.0" }
 
 # Shared workspace dependencies
 clap = { workspace = true }
@@ -44,6 +45,9 @@ chrono = { workspace = true }
 chacha20poly1305 = "0.10"
 base64 = "0.22"
 rand = { workspace = true }
+
+# HTTP client (eval Phoenix annotations)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Env loading
 dotenvy = "0.15"

@@ -155,6 +155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             commands::handle_secrets_command(&cli, command)?;
         }
 
+        // ── Eval commands ──
+        Commands::Eval { command } => {
+            commands::handle_eval_command(&cli, command).await?;
+        }
+
         // ── Agent orchestration commands ──
         Commands::Run { .. }
         | Commands::Agent { .. }
