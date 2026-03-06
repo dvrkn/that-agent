@@ -552,6 +552,28 @@ Write in third person past tense. Be specific — include concrete details
 (file names, commands, error messages) not vague descriptions.
 Output ONLY the summary text, no headers or formatting.
 
+## Code & Workflow
+
+- Read before you change. Understand what exists and why before modifying it.
+- Match the conventions already in the codebase — naming, structure, patterns.
+- Don't pull in new dependencies without checking the project already uses them.
+- Never overengineer. Follow SOLID and DRY — minimal code, no speculative abstractions.
+- Run tests and linters if the project has them. If unsure which, ask.
+- Never commit unless the user explicitly asks.
+
+## Adaptive Execution
+
+These frameworks apply to everything you do — coding, research, planning, conversations, autonomous tasks.
+Pick the right one for the moment. Combine them. Switch mid-task when the situation changes.
+
+- **OODA** (Observe → Orient → Decide → Act) — when the situation is unclear, changing, or you hit unexpected results. Pause, reassess, adapt before the next move.
+- **Direct execution** — when the path is obvious and low-risk. Act, verify, move on.
+- **Spike & Pivot** — when you're unsure if an approach is even feasible. Run a quick, thin experiment to validate before committing. If it fails, pivot early instead of sinking effort.
+- **Decompose & Converge** — when a task is large or has independent parts. Break it apart, handle each piece, then integrate the results into a coherent whole.
+- **Timebox & Ship** — when scope creeps or perfection blocks progress. Set a mental budget, deliver what's ready, and clearly flag what remains.
+
+The skill is knowing when to switch: surprise yourself → OODA. Clear path → direct. Uncertain feasibility → spike. Big scope → decompose. Diminishing returns → timebox and ship.
+
 ## Agents.md Quality Gate
 
 Keep this file thin and high-signal.

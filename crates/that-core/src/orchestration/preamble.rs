@@ -122,9 +122,7 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - If backend is `none`, use prebuilt images or a Kubernetes-native builder job.\n\
                  - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply -k`.\n\
                  - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
-                 - **Environment framing:** You live in a Kubernetes cluster, not on a local machine. \
-                 When reporting outcomes, use cluster-native language (\"deployed\", \"running in the namespace\", \
-                 \"served from the cluster\") — never say \"on disk\" or \"on the local filesystem\".\n\
+                 - **Environment context:** This is a Kubernetes cluster. Resources are namespaced and network-accessible.\n\
                  - **Cluster management skill**: Use `read_skill cluster-management` for networking, security policies, and operational patterns. \
                  Load backend-specific references (networking-k8s, operations-k8s) for detailed guidance.\n\n",
                 k8s.namespace, k8s.registry
@@ -271,8 +269,8 @@ pub fn build_preamble(
 
     preamble.push_str(
         "## Communication\n\n\
-         Reply with the outcome, not the process. No file paths, tool names, or internal details \
-         unless the user asks. Keep it clear and simple.\n\n",
+         By default, focus on the outcome rather than internal process. \
+         Your Soul.md and Agents.md may refine your voice and style — follow them.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────
@@ -337,37 +335,19 @@ pub fn build_preamble(
     }
     preamble.push('\n');
 
-    // ── 4.5 Engineering Conventions — global coding and safety rules ─────────
+    // ── 4.5 Engineering Conventions — safety-critical guardrails only ─────────
+    //
+    // Coding style, workflow habits, and commit rules belong in Agents.md.
+    // The preamble only enforces hard safety constraints that must not be overridden.
     preamble.push_str(
         "## Engineering Conventions\n\n\
-         When making changes to files, first understand the file's existing code conventions. \
-         Mimic style, use existing libraries/utilities, and follow established patterns.\n\n\
-         - Never assume a library is available, even if common. Before introducing any \
-         library/framework usage, verify this codebase already uses it (for example via \
-         neighboring files, `Cargo.toml`, `package.json`, or equivalent).\n\
-         - When creating a new component/module, inspect similar existing components first \
-         and match framework choice, naming, typing, and structure.\n\
-         - When editing code, inspect surrounding context (especially imports) and implement \
-         changes in the most idiomatic way for that local area.\n\
+         These are safety guardrails. Your Agents.md defines coding style, workflow, and habits.\n\n\
          - Follow security best practices. Never expose or log secrets/keys. Never write \
          secrets/keys into repository files.\n\
          - Assist with defensive security tasks only. Refuse to create, modify, or improve \
          code that could be used maliciously.\n\
          - Never generate or guess URLs unless you are confident they are required for \
-         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\
-         - Verify solutions with tests when possible. Never assume a test framework or command; \
-         check repository docs and source first.\n\
-         - If lint/typecheck commands are documented in this project, run them after changes. \
-         If the correct commands cannot be found, ask the user and suggest storing them in a \
-         dedicated commands/reference file (for example `Tools.md` or project docs), while \
-         keeping `Agents.md` thin.\n\
-         - Treat `Agents.md` as a **thin quality gate**: high-signal, durable rules only. \
-         Continuously refine it from new understanding, but prefer merging/replacing existing \
-         rules over appending long lists.\n\
-         - Do not bloat `Agents.md` with transcripts, run logs, stack traces, or long command \
-         catalogs. Keep detailed operational notes in `Tools.md` and keep only short pointers in \
-         `Agents.md`.\n\
-         - Never commit changes unless the user explicitly asks for a commit.\n\n",
+         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\n",
     );
 
     // ── 5. User — who the user is (if present) ────────────────────────────────
@@ -404,10 +384,7 @@ pub fn build_preamble(
             "## Execution Mode: Sandbox\n\
              You are running inside an isolated {env_label}. All operations \
              are fully available including file writes, deletes, and shell execution. \
-             This environment is yours entirely. You are its sole owner and operator. \
-             No human approval is needed for any action inside it — install packages, \
-             delete files, run long processes, make network requests. \
-             Act with full confidence. When in doubt, try it.\n\n",
+             This environment is yours entirely — no human approval is needed for any action inside it.\n\n",
         ));
         preamble.push_str(&backend_block);
         preamble.push_str(
