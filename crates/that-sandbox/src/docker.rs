@@ -93,6 +93,26 @@ impl DockerSandboxClient {
         format!("that-agent-{agent_name}-home")
     }
 
+    /// Look for build.sh in CWD or common project root markers.
+    fn find_build_script() -> Option<std::path::PathBuf> {
+        // Check CWD first
+        let cwd = std::env::current_dir().ok()?;
+        let candidate = cwd.join("build.sh");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        // Walk up looking for Cargo.toml (workspace root) + build.sh
+        let mut dir = cwd.as_path();
+        while let Some(parent) = dir.parent() {
+            let script = parent.join("build.sh");
+            if script.exists() && parent.join("Cargo.toml").exists() {
+                return Some(script);
+            }
+            dir = parent;
+        }
+        None
+    }
+
     fn inspect_container(name: &str) -> ContainerState {
         let output = std::process::Command::new("docker")
             .args(["inspect", "--format", "{{.State.Status}}", name])
@@ -351,10 +371,31 @@ impl DockerSandboxClient {
         match check {
             Ok(status) if status.success() => {}
             _ => {
-                anyhow::bail!(
-                    "Sandbox image '{image}' not found. Build it first:\n  \
-                     ./build.sh"
-                );
+                // Try auto-building if build.sh exists in the working directory or project root.
+                let build_script = Self::find_build_script();
+                if let Some(script) = build_script {
+                    eprintln!(
+                        "Sandbox image '{image}' not found — auto-building via {}…",
+                        script.display()
+                    );
+                    let build = std::process::Command::new("bash")
+                        .arg(&script)
+                        .env("THAT_AGENT_IMAGE", &image)
+                        .status();
+                    match build {
+                        Ok(s) if s.success() => {}
+                        _ => {
+                            anyhow::bail!(
+                                "Auto-build of sandbox image '{image}' failed. Check build output above."
+                            );
+                        }
+                    }
+                } else {
+                    anyhow::bail!(
+                        "Sandbox image '{image}' not found. Build it first:\n  \
+                         ./build.sh"
+                    );
+                }
             }
         }
 

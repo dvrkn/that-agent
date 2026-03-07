@@ -130,7 +130,158 @@ that chat
 curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 ```
 
-Installs k3s, prompts for agent name and API credentials, deploys the agent. The description you provide is interpreted by the LLM at first boot to generate the agent's identity.
+The installer is interactive and sets up a production-ready single-node cluster with everything the agent needs. All infrastructure components are enabled by default and can be skipped with flags.
+
+#### What it installs
+
+| Step | Component | What it does | Skip flag |
+|------|-----------|-------------|-----------|
+| 1 | [k3s](https://k3s.io/) | Lightweight Kubernetes distribution | `--no-k3s` |
+| 2 | [Cilium](https://cilium.io/) | eBPF-based CNI with L3/L4/L7 network policies and [Hubble](https://docs.cilium.io/en/stable/observability/hubble/) flow observability | `--no-cilium` |
+| 3 | [Tailscale Operator](https://tailscale.com/kb/1236/kubernetes-operator) | Expose cluster services to your Tailnet — no public IPs, no port forwarding | `--no-tailscale` |
+| 4 | [K9s](https://k9scli.io/) | Terminal-based Kubernetes UI for cluster inspection | `--no-k9s` |
+| — | Sub-agent RBAC | ClusterRole for namespace creation and cross-namespace orchestration | `--no-subagents` |
+| — | Cluster admin | Bind to `cluster-admin` instead of scoped ClusterRole (opt-in) | `--cluster-admin` |
+| 5 | In-cluster registry | Private container registry (NodePort) for agent-built images | always |
+| 6–9 | Agent config + deploy | Interactive prompts → Kustomize overlay → `kubectl apply` | — |
+
+#### Interactive prompts
+
+The installer asks for:
+
+- **Agent name** — lowercase identifier for the deployment
+- **Agent description** — free-text prompt used by the LLM at first boot to generate the agent's identity (`Soul.md`, `Identity.md`)
+- **LLM API key** — Anthropic, OpenAI, or OpenRouter (auto-detected from key prefix)
+- **Model override** — optional, defaults to the provider's recommended model
+- **Telegram bot token + chat ID** — optional, for Telegram channel integration
+- **Tailscale OAuth credentials** — client ID + secret for the operator (prompted only when Tailscale is enabled)
+- **Tailnet name** — optional (e.g. `myteam` from `myteam.ts.net`), so the agent can construct mesh URLs directly
+
+#### Infrastructure awareness
+
+The installer writes infrastructure metadata into the agent's ConfigMap. At runtime, the agent's system-reminder reflects exactly what's installed:
+
+- **Cilium as CNI** — the agent knows it has L7 network policies available and loads the `cluster-management` skill with Cilium-specific references for zero-trust enforcement and Hubble flow visibility
+- **Tailscale Operator + tailnet name** — the agent can construct mesh URLs (`https://<service>.<tailnet>.ts.net`) without wasting turns on discovery
+- **K9s** — the agent knows an interactive cluster UI is available on the host
+
+#### Network flags
+
+When Cilium is enabled, k3s is installed with `--flannel-backend=none --disable-network-policy` so Cilium fully owns the networking stack. The agent's `cluster-management` skill teaches it to establish default-deny policies per namespace and layer L7 allow rules on top.
+
+#### Running the install with flags
+
+```bash
+# Skip Cilium and K9s, keep Tailscale
+bash install.sh --no-cilium --no-k9s
+
+# Full cluster-admin for a single-user VPS
+bash install.sh --cluster-admin
+```
+
+#### Environment variables
+
+All interactive prompts can be pre-set via environment variables, enabling fully non-interactive installs. Set them before piping the script:
+
+```bash
+# Fully non-interactive one-liner with cluster-admin
+ANTHROPIC_API_KEY=sk-ant-... \
+CLUSTER_ADMIN=true \
+TS_OAUTH_CLIENT_ID=... \
+TS_OAUTH_CLIENT_SECRET=... \
+TS_TAILNET_NAME=myteam \
+  curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
+```
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (auto-detected) | — |
+| `OPENAI_API_KEY` | OpenAI API key (auto-detected) | — |
+| `OPENROUTER_API_KEY` | OpenRouter API key (auto-detected) | — |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token (auto-detected) | — |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID | prompted |
+| `TS_OAUTH_CLIENT_SECRET` | Tailscale OAuth client secret | prompted |
+| `TS_TAILNET_NAME` | Tailnet name (e.g. `myteam` from `myteam.ts.net`) | prompted |
+| `INSTALL_K3S` | Install k3s | `true` |
+| `INSTALL_CILIUM` | Install Cilium CNI | `true` |
+| `INSTALL_TAILSCALE_OPERATOR` | Install Tailscale Operator | `true` |
+| `INSTALL_K9S` | Install K9s | `true` |
+| `ENABLE_SUBAGENTS` | ClusterRole for cross-namespace sub-agents | `true` |
+| `CLUSTER_ADMIN` | Bind to built-in `cluster-admin` ClusterRole | `false` |
+
+#### Post-install
+
+```bash
+# Follow agent logs
+kubectl -n that-<agent-name> logs -f deploy/that-agent
+
+# Shell into the agent pod and start a TUI chat
+kubectl -n that-<agent-name> exec -it deploy/that-agent -- that run chat --agent <agent-name>
+
+# Interactive cluster inspection
+k9s
+```
+
+#### RBAC — what the agent can access
+
+The agent gets two levels of RBAC: a **namespace-scoped Role** for full control within its own namespace, and a **ClusterRole** for bootstrapping sub-agent namespaces.
+
+**Namespace Role** (`that-agent-runtime`) — full access within `that-<agent-name>`:
+
+| API Group | Resources | Verbs | Why |
+|-----------|-----------|-------|-----|
+| `""` (core) | pods, pods/log, services, endpoints, configmaps, secrets, serviceaccounts, persistentvolumeclaims, events | all | Deploy and manage plugin workloads, read logs, manage config |
+| `apps` | deployments, statefulsets, daemonsets, replicasets | all | Create/update/rollback plugin deployments |
+| `batch` | jobs, cronjobs | all | Run one-off build jobs and scheduled tasks |
+| `networking.k8s.io` | ingresses, networkpolicies | all | Manage service exposure and zero-trust network policies |
+| `autoscaling` | horizontalpodautoscalers | all | Scale plugin workloads |
+| `policy` | poddisruptionbudgets | all | Manage disruption budgets for resilient deployments |
+| `rbac.authorization.k8s.io` | roles, rolebindings | all | Create scoped RBAC for sub-agent ServiceAccounts |
+| `*` (wildcard) | `*` | all | Access namespaced custom resources managed by plugins (e.g. Tailscale proxies, CRDs from operator charts) |
+
+**ClusterRole** (`that-agent-cluster`) — cross-namespace operations for sub-agent orchestration:
+
+| API Group | Resources | Verbs | Why |
+|-----------|-----------|-------|-----|
+| `""` (core) | namespaces | all | Create/delete namespaces for sub-agents |
+| `rbac.authorization.k8s.io` | roles, rolebindings | all | Bootstrap RBAC in new sub-agent namespaces so the parent SA gains access |
+| `""` (core) | pods, pods/log, services, events | get, list, watch | Monitor sub-agent workloads across namespaces |
+| `apps` | deployments, statefulsets | get, list, watch | Watch sub-agent deployment status across namespaces |
+
+**How sub-agent namespace bootstrap works:**
+
+1. Parent agent creates a new namespace for the sub-agent
+2. Parent creates a **Role** in that namespace (mirroring `that-agent-runtime` permissions)
+3. Parent creates a **RoleBinding** in that namespace, binding its own ServiceAccount to that Role
+4. Parent can now deploy the sub-agent and manage resources in that namespace
+5. The sub-agent inherits the same pattern if it needs to spawn its own children
+
+This is the least-privilege approach — the ClusterRole only grants the ability to create namespaces and bootstrap RBAC. Actual resource management in each namespace requires the explicit RoleBinding step.
+
+**What this means for cluster admins:**
+
+- The agent **can** create new namespaces and grant itself access to them via RBAC bootstrap
+- The agent **cannot** access existing namespaces it hasn't bootstrapped into (no pre-existing RoleBinding = no access)
+- The agent **cannot** create or modify ClusterRoles or ClusterRoleBindings (it only has the pre-installed ones)
+- The agent **cannot** access Nodes, PersistentVolumes, or other cluster-scoped resources beyond namespaces
+- The ClusterRole grants **read-only** cross-namespace access to pods, services, and deployments — not write
+- The pod runs as **non-root** (UID 1000) with no host path mounts
+
+**Hardening options:**
+
+| Action | Effect |
+|--------|--------|
+| Remove the ClusterRole + ClusterRoleBinding | Agent cannot spawn sub-agents in separate namespaces — all work stays in its own namespace |
+| Remove the `*/*` wildcard from the namespace Role | Restrict to only the explicitly listed API groups — tighter but may break CRD-based operators |
+| Remove `secrets` from core resources | Agent loses ability to manage secrets for its plugins (must be pre-created by operator) |
+| Remove namespace `create`/`delete` from ClusterRole | Agent can only use pre-created namespaces for sub-agents (operator provisions them) |
+| Add label selectors to namespace management | Restrict namespace operations to only namespaces with a specific label (e.g. `that-agent/managed: "true"`) |
+
+**`--cluster-admin` mode:**
+
+For single-user VPS setups where the agent is the sole operator of the cluster, pass `--cluster-admin` to the installer. This binds the agent's ServiceAccount to the built-in `cluster-admin` ClusterRole — full unrestricted access to all resources in all namespaces. Use this when you want the agent to manage the entire cluster (install operators, configure cluster-wide resources, manage all namespaces) without RBAC friction. **Not recommended for shared or multi-tenant clusters.**
+
+Manifests: [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml) (namespace), [`deploy/k8s/base/clusterrole.yaml`](./deploy/k8s/base/clusterrole.yaml) (cluster).
 
 ### Docker
 

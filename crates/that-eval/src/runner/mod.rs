@@ -98,12 +98,13 @@ impl ScenarioRunner {
         if scenario.sandbox {
             println!("Sandbox  : preparing container …");
         }
+        // 10 minutes: allows auto-build of the sandbox image on first run.
         let container = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(600),
             prepare_container(&agent, &workspace, scenario.sandbox),
         )
         .await
-        .context("Sandbox container setup timed out after 60s — is Docker running and the image built? Run: ./build.sh")??;
+        .context("Sandbox container setup timed out after 10m — is Docker running?")??;
         if scenario.sandbox {
             println!("Sandbox  : ready");
         }

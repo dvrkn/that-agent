@@ -34,16 +34,34 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
     match that_sandbox::backend::SandboxMode::from_env() {
         that_sandbox::backend::SandboxMode::Docker => {
             let socket = that_sandbox::docker::docker_socket_status();
+            let tailscale = std::env::var("THAT_CLUSTER_TAILSCALE").unwrap_or_default();
+            let mut infra = String::new();
+            if tailscale == "true" {
+                let tailnet = std::env::var("THAT_CLUSTER_TAILNET_NAME").unwrap_or_default();
+                if tailnet.is_empty() {
+                    infra.push_str(
+                        "                     - **Tailscale**: available — load `read_skill cluster-management tailscale-docker` for mesh exposure.\n"
+                    );
+                } else {
+                    infra.push_str(&format!(
+                        "                     - **Tailscale**: available — tailnet: `{tailnet}.ts.net` — mesh URLs follow `https://<hostname>.{tailnet}.ts.net`. Load `read_skill cluster-management tailscale-docker` for details.\n"
+                    ));
+                }
+            }
+            let skill_hint = "                     - **Cluster management skill**: Use `read_skill cluster-management` for networking and operational patterns. \
+                     Load Docker-specific references (networking-docker, operations-docker) for detailed guidance.\n\n";
             if socket.enabled {
                 format!(
                     "### Runtime Backend: Docker\n\
                      - Mode: `docker`\n\
                      - Host Docker socket: enabled at `{}`\n\
+                     {infra}\
                      - You can orchestrate sibling containers and compose stacks from inside this sandbox.\n\
                      - For \"run/deploy this app\" requests, prefer Docker-native flows (`docker build`, `docker run`, `docker compose`).\n\
                      - If the user explicitly asks to run/deploy \"in Docker\", execute a Docker workflow and report container/port details.\n\
                      - If `docker` CLI is missing in-container, install it (`sudo apt-get update && sudo apt-get install -y docker.io`).\n\
-                     - Do not default to `python3 -m http.server` for deployment requests; use it only for temporary static preview when explicitly acceptable.\n\n",
+                     - Do not default to `python3 -m http.server` for deployment requests; use it only for temporary static preview when explicitly acceptable.\n\
+                     {skill_hint}",
                     socket.path.display()
                 )
             } else {
@@ -51,19 +69,48 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                     "### Runtime Backend: Docker\n\
                      - Mode: `docker`\n\
                      - Host Docker socket: unavailable at `{}`\n\
+                     {infra}\
                      - You can still run processes in this sandbox container, but you cannot spawn sibling host containers via Docker socket.\n\
-                     - If the user explicitly needs host-level Docker orchestration, state the socket limitation clearly.\n\n",
+                     - If the user explicitly needs host-level Docker orchestration, state the socket limitation clearly.\n\
+                     {skill_hint}",
                     socket.path.display()
                 )
             }
         }
         that_sandbox::backend::SandboxMode::Kubernetes => {
             let k8s = that_sandbox::kubernetes::KubernetesSandboxClient::from_env(&agent.name);
+            let cni = std::env::var("THAT_CLUSTER_CNI").unwrap_or_default();
+            let tailscale = std::env::var("THAT_CLUSTER_TAILSCALE").unwrap_or_default();
+            let k9s = std::env::var("THAT_CLUSTER_K9S").unwrap_or_default();
+            let mut infra = String::new();
+            if !cni.is_empty() {
+                infra.push_str(&format!(
+                    "                 - **CNI**: `{cni}` — load `read_skill cluster-management cilium` for L7 policies, zero-trust, and flow observability.\n"
+                ));
+            }
+            if tailscale == "true" {
+                let tailnet = std::env::var("THAT_CLUSTER_TAILNET_NAME").unwrap_or_default();
+                if tailnet.is_empty() {
+                    infra.push_str(
+                        "                 - **Tailscale Operator**: installed — load `read_skill cluster-management tailscale-k8s` for mesh exposure.\n"
+                    );
+                } else {
+                    infra.push_str(&format!(
+                        "                 - **Tailscale Operator**: installed — tailnet: `{tailnet}.ts.net` — mesh URLs follow `https://<hostname>.{tailnet}.ts.net`. Load `read_skill cluster-management tailscale-k8s` for details.\n"
+                    ));
+                }
+            }
+            if k9s == "true" {
+                infra.push_str(
+                    "                 - **K9s**: available on host for interactive cluster inspection.\n"
+                );
+            }
             format!(
                 "### Runtime Backend: Kubernetes\n\
                  - Mode: `kubernetes`\n\
                  - Namespace: `{}`\n\
                  - Registry: `{}`\n\
+                 {infra}\
                  - Use `k8s_registry_push` from `<system-reminder>` for in-cluster push endpoint when it differs from image reference registry.\n\
                  - Base deployment includes a rootless BuildKit sidecar exposed via `${{BUILDKIT_HOST}}`.\n\
                  - Use `image_build_backend` from `<system-reminder>` to choose builder (`buildkit`, `docker`, or `none`) and follow it strictly.\n\
@@ -75,9 +122,9 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - If backend is `none`, use prebuilt images or a Kubernetes-native builder job.\n\
                  - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply -k`.\n\
                  - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
-                 - **Environment framing:** You live in a Kubernetes cluster, not on a local machine. \
-                 When reporting outcomes, use cluster-native language (\"deployed\", \"running in the namespace\", \
-                 \"served from the cluster\") — never say \"on disk\" or \"on the local filesystem\".\n\n",
+                 - **Environment context:** This is a Kubernetes cluster. Resources are namespaced and network-accessible.\n\
+                 - **Cluster management skill**: Use `read_skill cluster-management` for networking, security policies, and operational patterns. \
+                 Load backend-specific references (networking-k8s, operations-k8s) for detailed guidance.\n\n",
                 k8s.namespace, k8s.registry
             )
         }
@@ -154,12 +201,7 @@ pub fn build_preamble(
             preamble.push('\n');
         }
 
-        preamble.push_str(
-            "\n> **On self-editing Identity.md or Soul.md**: Before any change, read the file fully. \
-             Understand the why behind each section. \
-             Edit with surgical precision — these files are your identity, not a scratch pad. \
-             After editing, re-read the result to confirm coherence.\n\n",
-        );
+        preamble.push('\n');
     }
 
     // ── 2. Harness — compiled (runtime-volatile paths and modes) ─────────────
@@ -206,16 +248,17 @@ pub fn build_preamble(
     preamble.push_str(
         "## Tools Available\n\
          Call typed tools by name. Use `read_skill <name>` to load a skill reference before using it.\n\
-         For existing code/skill/plugin files, prefer `code_edit` for targeted edits; use `fs_write` \
-         mainly for creating new files or explicit full-file rewrites.\n\
-         After every successful `code_edit`, call `code_read` on that file to verify the actual result before doing another edit or finalizing your response.\n\
-         Heartbeat schedules support `once|minutely|hourly|daily|weekly` and cron expressions (`cron: */5 * * * *`).\n\
-         For reminders or deferred one-time tasks, use `schedule: once` with a `not_before:` field set to an RFC3339 timestamp — the entry will not fire until that time. \
-         Do not use `priority: urgent` or cron hacks for reminders; just set `not_before` to the target time.\n\
-         For recurring entries, use `status: running`; set `status: done` only to disable.\n\
-         Prefer Heartbeat schedules over installing/configuring system cron daemons for agent recurrence.\n\
-         To set your timezone, add `timezone = \"IANA/Name\"` to your agent config.toml — never hack shell profiles or /etc/localtime. \
-         The runtime uses this field for wall-clock schedules (daily, cron) and all timestamps.\n\n",
+         Heartbeat fields: `schedule` (`once|minutely|hourly|daily|weekly|cron: <expr>`), \
+         `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp).\n\
+         Your Agents.md defines tool habits and workflow preferences.\n\n",
+    );
+
+    // ── 3.1. Communication — keep responses human ─────────────────────────────
+
+    preamble.push_str(
+        "## Communication\n\n\
+         By default, focus on the outcome rather than internal process. \
+         Your Soul.md and Agents.md may refine your voice and style — follow them.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────
@@ -225,8 +268,6 @@ pub fn build_preamble(
     // where its memory store is and that it is empty — so it knows to call mem_recall.
     // Full chunks live in SQLite; the agent fetches them on demand via mem_recall.
 
-    let can_write = sandbox || trusted_local;
-
     preamble.push_str("## Memory Index\n\n");
     if let Some(mem) = &ws.memory {
         preamble.push_str(mem);
@@ -234,24 +275,7 @@ pub fn build_preamble(
             preamble.push('\n');
         }
     } else {
-        preamble.push_str(
-            "> Memory store is empty — no compaction summaries yet.\n\
-             > Call `mem_recall \"<topic>\"` to search, `mem_add` to store, \
-             and `mem_compact` to create a pinned summary.\n",
-        );
-        if can_write {
-            preamble.push_str(
-                "> After your first `mem_compact`, write `Memory.md` in your agent directory \
-                 with the index format described in the default template.\n",
-            );
-        }
-    }
-    if can_write {
-        preamble.push_str(
-            "> After each `mem_compact`, update this file: append a row to Compaction Summaries \
-             (`| date | topic | recall query |`) and refresh the Active Topics line. \
-             Keep it thin — pointers only, never full content.\n",
-        );
+        preamble.push_str("> Memory store is empty. Your Agents.md describes how to use it.\n");
     }
     preamble.push('\n');
 
@@ -280,37 +304,19 @@ pub fn build_preamble(
     }
     preamble.push('\n');
 
-    // ── 4.5 Engineering Conventions — global coding and safety rules ─────────
+    // ── 4.5 Engineering Conventions — safety-critical guardrails only ─────────
+    //
+    // Coding style, workflow habits, and commit rules belong in Agents.md.
+    // The preamble only enforces hard safety constraints that must not be overridden.
     preamble.push_str(
         "## Engineering Conventions\n\n\
-         When making changes to files, first understand the file's existing code conventions. \
-         Mimic style, use existing libraries/utilities, and follow established patterns.\n\n\
-         - Never assume a library is available, even if common. Before introducing any \
-         library/framework usage, verify this codebase already uses it (for example via \
-         neighboring files, `Cargo.toml`, `package.json`, or equivalent).\n\
-         - When creating a new component/module, inspect similar existing components first \
-         and match framework choice, naming, typing, and structure.\n\
-         - When editing code, inspect surrounding context (especially imports) and implement \
-         changes in the most idiomatic way for that local area.\n\
+         These are safety guardrails. Your Agents.md defines coding style, workflow, and habits.\n\n\
          - Follow security best practices. Never expose or log secrets/keys. Never write \
          secrets/keys into repository files.\n\
          - Assist with defensive security tasks only. Refuse to create, modify, or improve \
          code that could be used maliciously.\n\
          - Never generate or guess URLs unless you are confident they are required for \
-         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\
-         - Verify solutions with tests when possible. Never assume a test framework or command; \
-         check repository docs and source first.\n\
-         - If lint/typecheck commands are documented in this project, run them after changes. \
-         If the correct commands cannot be found, ask the user and suggest storing them in a \
-         dedicated commands/reference file (for example `Tools.md` or project docs), while \
-         keeping `Agents.md` thin.\n\
-         - Treat `Agents.md` as a **thin quality gate**: high-signal, durable rules only. \
-         Continuously refine it from new understanding, but prefer merging/replacing existing \
-         rules over appending long lists.\n\
-         - Do not bloat `Agents.md` with transcripts, run logs, stack traces, or long command \
-         catalogs. Keep detailed operational notes in `Tools.md` and keep only short pointers in \
-         `Agents.md`.\n\
-         - Never commit changes unless the user explicitly asks for a commit.\n\n",
+         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\n",
     );
 
     // ── 5. User — who the user is (if present) ────────────────────────────────
@@ -347,20 +353,9 @@ pub fn build_preamble(
             "## Execution Mode: Sandbox\n\
              You are running inside an isolated {env_label}. All operations \
              are fully available including file writes, deletes, and shell execution. \
-             This environment is yours entirely. You are its sole owner and operator. \
-             No human approval is needed for any action inside it — install packages, \
-             delete files, run long processes, make network requests. \
-             Act with full confidence. When in doubt, try it.\n\n",
+             This environment is yours entirely — no human approval is needed for any action inside it.\n\n",
         ));
         preamble.push_str(&backend_block);
-        preamble.push_str(
-            "### Kubernetes Deployment Hygiene\n\
-             - Use stable resource names and labels; do not create timestamp/random-suffixed Deployment names unless explicitly requested.\n\
-             - For repeat deploys, patch/apply the same Deployment instead of creating parallel ones.\n\
-             - Keep default plugin workloads at `replicas: 1` unless user asks for horizontal scaling.\n\
-             - If rollout fails or pods are evicted, investigate first (`kubectl describe`, `kubectl logs`, `kubectl get events`) and fix root cause before re-applying.\n\
-             - After recovery, clean stale failed/evicted pods for that app label so the namespace does not accumulate dead pods.\n\n",
-        );
         preamble.push_str(
             "Pre-installed: Rust, Go, Python 3, Node/TypeScript (pytest, requests available).\n\
              Install extras: `sudo apt-get install -y <pkg>` or `pip3 install <pkg>`.\n\n",
