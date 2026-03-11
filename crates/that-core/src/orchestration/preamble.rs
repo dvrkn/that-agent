@@ -249,7 +249,8 @@ pub fn build_preamble(
         "## Tools Available\n\
          Call typed tools by name. Use `read_skill <name>` to load a skill reference before using it.\n\
          Heartbeat fields: `schedule` (`once|minutely|hourly|daily|weekly|cron: <expr>`), \
-         `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp).\n\
+         `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp), \
+         `human_approved` (`true` required for `minutely` and sub-hourly cron after explicit human approval).\n\
          Your Agents.md defines tool habits and workflow preferences.\n\n",
     );
 

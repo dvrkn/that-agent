@@ -526,7 +526,7 @@ Add entries to schedule autonomous work — things you want to happen periodical
 external trigger.
 
 Each entry is an H2 heading, followed by key-value fields (`priority`, `schedule`, `status`,
-optionally `last_run`), then a blank line, then the body description.
+optionally `human_approved`, `last_run`), then a blank line, then the body description.
 
 Schedules: `once` | `minutely` | `hourly` | `daily` | `weekly` | `cron: <expr>`.
 Urgent entries trigger immediately on first dispatch, then follow schedule.
@@ -534,6 +534,9 @@ Use `status: running` for active recurring work and `status: done` to disable an
 For reminders or deferred one-time tasks, use `schedule: once` with `not_before:` set to an
 RFC3339 timestamp — the entry stays dormant until that time. Do not use `priority: urgent` or
 cron hacks for reminders; just set `not_before` to the target time.
+Minute-level schedules require explicit human approval first. Before using `schedule: minutely`
+or sub-hourly cron, ask via `human_ask`; only after the human clearly approves may you set
+`human_approved: true`. Without that field, the runtime will not fire the entry.
 Prefer Heartbeat schedules over installing system cron daemons for recurring agent work.
 To set your timezone, add `timezone = "IANA/Name"` to your agent config — the runtime uses it
 for wall-clock schedules (daily, cron) and all timestamps.
