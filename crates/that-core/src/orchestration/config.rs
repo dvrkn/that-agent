@@ -92,15 +92,10 @@ pub fn should_use_channel_empty_response_fallback(
         return false;
     }
 
-    // If the run already emitted an explicit channel_notify tool call, allow
-    // empty final text to avoid sending a duplicate fallback message.
-    let used_channel_notify = tool_events.iter().any(|ev| {
-        matches!(
-            ev,
-            that_channels::ToolLogEvent::Call { name, .. } if name == "channel_notify"
-        )
-    });
-    !used_channel_notify
+    // Mid-task notifications are not a substitute for the run's final user-facing
+    // answer. Only suppress the fallback when a terminal channel delivery tool
+    // already succeeded and produced its own outbound message.
+    !has_successful_terminal_channel_output(tool_events)
 }
 
 pub fn summarize_tool_result_for_empty_response(
@@ -149,6 +144,25 @@ pub fn build_empty_channel_response_fallback(
     }
 }
 
+const TERMINAL_CHANNEL_TOOL_NAMES: &[&str] = &[
+    "channel_send_message",
+    "channel_send_file",
+    "channel_send_raw",
+];
+
+fn has_successful_terminal_channel_output(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    tool_events.iter().any(|ev| {
+        matches!(
+            ev,
+            that_channels::ToolLogEvent::Result {
+                name,
+                is_error: false,
+                ..
+            } if TERMINAL_CHANNEL_TOOL_NAMES.contains(&name.as_str())
+        )
+    })
+}
+
 /// Memory tools are safe to re-invoke (idempotent intent); the model should
 /// still generate a user-facing confirmation after calling them.
 const MEMORY_TOOL_NAMES: &[&str] = &["mem_add", "mem_recall", "mem_compact"];
@@ -192,6 +206,63 @@ instruction: Your previous completion was empty. Return a concise user-facing an
 If blocked, explicitly state the blocker and one concrete next step.\n\
 </system-reminder>"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_channel_empty_response_fallback;
+    use that_channels::ToolLogEvent;
+
+    #[test]
+    fn empty_response_after_channel_notify_still_uses_fallback() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "channel_notify".into(),
+                args: r#"{"message":"checkpoint"}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "channel_notify".into(),
+                result: r#"{"sent":true}"#.into(),
+                is_error: false,
+            },
+        ];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_successful_terminal_channel_send_skips_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"sent":true}"#.into(),
+            is_error: false,
+        }];
+
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_failed_terminal_channel_send_uses_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"error":"boom"}"#.into(),
+            is_error: true,
+        }];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
 }
 
 /// Append volatile runtime metadata to the tail of the user message so it

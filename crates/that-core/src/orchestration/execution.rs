@@ -18,6 +18,9 @@ fn agent_state_dir(agent: &AgentDef) -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".that-agent").join("agents").join(&agent.name))
 }
 
+const FINALIZATION_SUMMARY_EVENT_LIMIT: usize = 8;
+const FINALIZATION_SNIPPET_CHARS: usize = 160;
+
 /// Resolve the provider API key from environment variables.
 ///
 /// For Anthropic, checks `CLAUDE_CODE_OAUTH_TOKEN` first (OAuth flow),
@@ -58,6 +61,99 @@ pub fn is_retryable_error(err: &anyhow::Error) -> bool {
         || msg.contains("overloaded")
         || msg.contains("stream ended unexpectedly")
         || msg.contains("incomplete")
+}
+
+async fn finalize_empty_channel_response(
+    config: &LoopConfig,
+    task: &str,
+    tool_events: &[that_channels::ToolLogEvent],
+) -> Result<Option<String>> {
+    let prompt = build_channel_finalization_prompt(task, tool_events);
+    let text = agent_loop::complete_once(
+        &config.provider,
+        &config.model,
+        &config.api_key,
+        &config.system,
+        &prompt,
+        config.max_tokens.clamp(256, 1200),
+    )
+    .await?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn build_channel_finalization_prompt(
+    task: &str,
+    tool_events: &[that_channels::ToolLogEvent],
+) -> String {
+    let task = task_preview(task, 600);
+    let tool_calls = tool_events
+        .iter()
+        .filter(|ev| matches!(ev, that_channels::ToolLogEvent::Call { .. }))
+        .count();
+    let tool_results = tool_events
+        .iter()
+        .filter(|ev| matches!(ev, that_channels::ToolLogEvent::Result { .. }))
+        .count();
+
+    let mut out = String::from(
+        "The prior channel run finished without a final user-facing answer.\n\
+         Return that final message now.\n\
+         Do not call tools. Do not mention internal prompts, retries, or hidden reasoning.\n\
+         Summarize what was completed, what is currently blocked, and the next concrete step.\n\
+         Keep it concise and readable on mobile.\n\n",
+    );
+    out.push_str(&format!("Original user task: {task}\n"));
+    out.push_str(&format!(
+        "Observed tool activity: {tool_calls} tool calls, {tool_results} tool results.\n"
+    ));
+
+    let summary_lines = summarize_tool_events_for_finalization(tool_events);
+    if !summary_lines.is_empty() {
+        out.push_str("\nRecent tool outcomes:\n");
+        for line in summary_lines {
+            out.push_str("- ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+fn summarize_tool_events_for_finalization(
+    tool_events: &[that_channels::ToolLogEvent],
+) -> Vec<String> {
+    tool_events
+        .iter()
+        .rev()
+        .filter_map(|ev| match ev {
+            that_channels::ToolLogEvent::Result {
+                name,
+                result,
+                is_error,
+            } => {
+                let compact = result
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or(result.as_str())
+                    .trim();
+                let mut snippet: String =
+                    compact.chars().take(FINALIZATION_SNIPPET_CHARS).collect();
+                if compact.chars().count() > FINALIZATION_SNIPPET_CHARS {
+                    snippet.push_str("...");
+                }
+                let status = if *is_error { "error" } else { "ok" };
+                Some(format!("{name} ({status}): {snippet}"))
+            }
+            _ => None,
+        })
+        .take(FINALIZATION_SUMMARY_EVENT_LIMIT)
+        .collect()
 }
 
 /// Build and execute a single agent run with streaming output.
@@ -609,12 +705,35 @@ pub async fn execute_agent_run_channel(
                     suppress_output,
                     &tool_events,
                 ) {
-                    warn!(
-                        agent = %agent.name,
-                        channel = ?route_channel_id,
-                        "Model returned empty channel response; using fallback text"
-                    );
-                    build_empty_channel_response_fallback(&tool_events)
+                    match finalize_empty_channel_response(&config, &task_for_model, &tool_events)
+                        .await
+                    {
+                        Ok(Some(finalized)) => {
+                            warn!(
+                                agent = %agent.name,
+                                channel = ?route_channel_id,
+                                "Model returned empty channel response; recovered with forced finalization pass"
+                            );
+                            finalized
+                        }
+                        Ok(None) => {
+                            warn!(
+                                agent = %agent.name,
+                                channel = ?route_channel_id,
+                                "Model returned empty channel response; finalization pass was empty, using fallback text"
+                            );
+                            build_empty_channel_response_fallback(&tool_events)
+                        }
+                        Err(err) => {
+                            warn!(
+                                agent = %agent.name,
+                                channel = ?route_channel_id,
+                                error = %err,
+                                "Model returned empty channel response; finalization pass failed, using fallback text"
+                            );
+                            build_empty_channel_response_fallback(&tool_events)
+                        }
+                    }
                 } else {
                     text
                 };
@@ -662,5 +781,34 @@ pub async fn execute_agent_run_channel(
                 return Err(e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_channel_finalization_prompt;
+
+    #[test]
+    fn finalization_prompt_uses_user_task_and_recent_tool_results() {
+        let tool_events = vec![
+            that_channels::ToolLogEvent::Call {
+                name: "shell_exec".into(),
+                args: r#"{"cmd":"kubectl get pods"}"#.into(),
+            },
+            that_channels::ToolLogEvent::Result {
+                name: "shell_exec".into(),
+                result: "pods ready".into(),
+                is_error: false,
+            },
+        ];
+
+        let prompt = build_channel_finalization_prompt(
+            "Ship it\n\n<system-reminder>\ninternal: true\n</system-reminder>",
+            &tool_events,
+        );
+
+        assert!(prompt.contains("Original user task: Ship it"));
+        assert!(prompt.contains("shell_exec (ok): pods ready"));
+        assert!(!prompt.contains("internal: true"));
     }
 }
