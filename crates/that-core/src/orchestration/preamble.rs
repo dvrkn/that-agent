@@ -214,9 +214,12 @@ pub fn build_preamble(
         preamble.push_str(&format!(
             "## Harness\n\n\
              - **Agent**: {agent_name} | **Container**: `{container_name}` (yours entirely)\n\
-             - **Base dir**: /home/agent/.that-agent/agents/{agent_name}/\n\
+             - **Persistent home**: /home/agent/.that-agent/\n\
+             - **Agent home**: /home/agent/.that-agent/agents/{agent_name}/\n\
+             - **Task workspace**: /workspace\n\
              - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
-             - Use `fs_ls` on your agent directory to see all workspace files.\n\
+             - Use `/workspace` for project/task files and generated artifacts you want in the visible work tree.\n\
+             - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
              You own this container entirely — install packages, delete files, run processes, \
              make network calls without asking. When uncertain, try it.\n\n\
@@ -230,9 +233,11 @@ pub fn build_preamble(
         preamble.push_str(&format!(
             "## Harness\n\n\
              - **Agent**: {agent_name} | **Workspace**: {workspace}\n\
-             - **Base dir**: ~/.that-agent/agents/{agent_name}/\n\
+             - **Persistent home**: ~/.that-agent/\n\
+             - **Agent home**: ~/.that-agent/agents/{agent_name}/\n\
              - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
-             - Use `fs_ls` on your agent directory to see all workspace files.\n\
+             - Use the workspace for project/task files and generated artifacts you want in the visible work tree.\n\
+             - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
              **Channel access control** (Telegram adapter):\n\
              - `chat_id` — primary chat for outbound notifications\n\
@@ -391,11 +396,17 @@ pub fn build_preamble(
     // ── 8. Workspace path — compiled ─────────────────────────────────────────
 
     if sandbox {
-        preamble.push_str("## Workspace\nYour working directory is: /workspace\n\n");
+        preamble.push_str(
+            "## Workspace\n\
+             Your task/project working directory is: /workspace\n\
+             Persistent agent state lives under: /home/agent/.that-agent\n\n",
+        );
     } else {
         preamble.push_str(&format!(
-            "## Workspace\nYour working directory is: {}\n\n",
-            workspace_path.display()
+            "## Workspace\n\
+             Your task/project working directory is: {}\n\
+             Persistent agent state lives under: ~/.that-agent\n\n",
+            workspace_path.display(),
         ));
     }
 

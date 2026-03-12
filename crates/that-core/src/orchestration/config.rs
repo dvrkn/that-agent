@@ -211,6 +211,14 @@ If blocked, explicitly state the blocker and one concrete next step.\n\
 /// Append volatile runtime metadata to the tail of the user message so it
 /// doesn't invalidate the shared system-prompt cache prefix.
 pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
+    fn runtime_home_dir() -> std::path::PathBuf {
+        std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .ok()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     fn append_rbac_runtime_lines(lines: &mut Vec<String>, namespace: Option<&str>) {
         let scope = std::env::var("THAT_RBAC_SCOPE")
             .ok()
@@ -246,6 +254,28 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
     }
 
     let mut lines = vec![format!("sandbox_enabled: {sandbox}")];
+    let home_dir = runtime_home_dir();
+    let persistent_home_dir = home_dir.join(".that-agent");
+    lines.push(format!("home_dir: {}", home_dir.display()));
+    lines.push(format!(
+        "task_workspace_dir: {}",
+        if sandbox { "/workspace" } else { "." }
+    ));
+    lines.push(format!(
+        "persistent_home_dir: {}",
+        persistent_home_dir.display()
+    ));
+    lines.push(format!(
+        "agent_home_dir: {}",
+        persistent_home_dir
+            .join("agents")
+            .join(agent_name)
+            .display()
+    ));
+    lines.push(format!(
+        "state_dir: {}",
+        persistent_home_dir.join("state").display()
+    ));
     if !sandbox {
         if trusted_local_sandbox_enabled() {
             lines.push("trusted_local_sandbox: true".to_string());

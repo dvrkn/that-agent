@@ -189,6 +189,8 @@ pub async fn execute_agent_run_streaming(
     let history_len = history.as_ref().map(std::vec::Vec::len).unwrap_or(0);
     let task_for_model = append_memory_bootstrap_reminder(task, history_len);
     let mut attempt = 0u32;
+    let mut checkpoint_messages: Option<Vec<Message>> = None;
+    let mut checkpoint_usage = agent_loop::Usage::default();
     loop {
         if attempt > 0 {
             let delay_ms = RETRY_BASE_DELAY_MS << (attempt - 1).min(4);
@@ -226,10 +228,15 @@ pub async fn execute_agent_run_streaming(
             steering: None,
         };
         let hook = AgentHook { debug };
-        let result = agent_loop::run(&config, &task_for_model, &hook).await;
+        let result = if let Some(messages) = checkpoint_messages.clone() {
+            agent_loop::resume_with_checkpoint(&config, messages, &hook).await
+        } else {
+            agent_loop::run_with_checkpoint(&config, &task_for_model, &hook).await
+        };
 
         match result {
             Ok((text, usage)) => {
+                let usage = checkpoint_usage.add(&usage);
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -243,15 +250,19 @@ pub async fn execute_agent_run_streaming(
                 tracing::Span::current().record("otel.status_description", "agent run completed");
                 return Ok(text);
             }
-            Err(e) => {
-                if is_retryable_error(&e) && attempt < MAX_NETWORK_RETRIES {
+            Err(interrupted) => {
+                if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
                     attempt += 1;
+                    checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
+                    checkpoint_messages = Some(interrupted.messages);
                     continue;
                 }
                 tracing::Span::current().record("otel.status_code", "error");
-                tracing::Span::current()
-                    .record("otel.status_description", format!("{e:#}").as_str());
-                return Err(e);
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("{:#}", interrupted.error).as_str(),
+                );
+                return Err(interrupted.error);
             }
         }
     }
@@ -311,6 +322,9 @@ pub async fn execute_agent_run_eval(
     let history_len = history.as_ref().map(std::vec::Vec::len).unwrap_or(0);
     let task_for_model = append_memory_bootstrap_reminder(task, history_len);
     let mut attempt = 0u32;
+    let mut checkpoint_messages: Option<Vec<Message>> = None;
+    let mut checkpoint_usage = agent_loop::Usage::default();
+    let mut checkpoint_events: Vec<String> = Vec::new();
     loop {
         if attempt > 0 {
             let delay_ms = RETRY_BASE_DELAY_MS << (attempt - 1).min(4);
@@ -348,10 +362,17 @@ pub async fn execute_agent_run_eval(
             steering: None,
         };
         let hook = EvalHook::new();
-        let result = agent_loop::run(&config, &task_for_model, &hook).await;
+        let result = if let Some(messages) = checkpoint_messages.clone() {
+            agent_loop::resume_with_checkpoint(&config, messages, &hook).await
+        } else {
+            agent_loop::run_with_checkpoint(&config, &task_for_model, &hook).await
+        };
 
         match result {
             Ok((text, usage)) => {
+                let usage = checkpoint_usage.add(&usage);
+                let mut events = checkpoint_events;
+                events.extend(hook.take_events());
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -363,17 +384,22 @@ pub async fn execute_agent_run_eval(
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
                 tracing::Span::current().record("otel.status_description", "agent run completed");
-                return Ok((text, hook.take_events()));
+                return Ok((text, events));
             }
-            Err(e) => {
-                if is_retryable_error(&e) && attempt < MAX_NETWORK_RETRIES {
+            Err(interrupted) => {
+                if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
                     attempt += 1;
+                    checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
+                    checkpoint_messages = Some(interrupted.messages);
+                    checkpoint_events.extend(hook.take_events());
                     continue;
                 }
                 tracing::Span::current().record("otel.status_code", "error");
-                tracing::Span::current()
-                    .record("otel.status_description", format!("{e:#}").as_str());
-                return Err(e);
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("{:#}", interrupted.error).as_str(),
+                );
+                return Err(interrupted.error);
             }
         }
     }
@@ -551,6 +577,9 @@ pub async fn execute_agent_run_channel(
         channel_ctx
     );
     let full_preamble = preamble.to_string();
+    let mut checkpoint_messages: Option<Vec<Message>> = None;
+    let mut checkpoint_usage = agent_loop::Usage::default();
+    let mut checkpoint_tool_events: Vec<that_channels::ToolLogEvent> = Vec::new();
 
     loop {
         if attempt > 0 {
@@ -665,7 +694,11 @@ pub async fn execute_agent_run_channel(
         } else {
             task_for_model.clone()
         };
-        let result = agent_loop::run(&config, &task_for_attempt, &hook).await;
+        let result = if let Some(messages) = checkpoint_messages.clone() {
+            agent_loop::resume_with_checkpoint(&config, messages, &hook).await
+        } else {
+            agent_loop::run_with_checkpoint(&config, &task_for_attempt, &hook).await
+        };
 
         // Drop hook to flush log_tx sender side, then drain events.
         drop(hook);
@@ -676,6 +709,12 @@ pub async fn execute_agent_run_channel(
 
         match result {
             Ok((text, usage)) => {
+                let usage = checkpoint_usage.add(&usage);
+                if !checkpoint_tool_events.is_empty() {
+                    let mut merged = std::mem::take(&mut checkpoint_tool_events);
+                    merged.extend(tool_events);
+                    tool_events = merged;
+                }
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -760,13 +799,18 @@ pub async fn execute_agent_run_channel(
                 }
                 return Ok((text, tool_events));
             }
-            Err(e) => {
-                if is_retryable_error(&e) && attempt < MAX_NETWORK_RETRIES {
+            Err(interrupted) => {
+                if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
                     attempt += 1;
-                    // tool_events from this failed attempt are discarded on retry.
+                    checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
+                    checkpoint_messages = Some(interrupted.messages);
+                    checkpoint_tool_events.extend(tool_events);
                     continue;
                 }
-                let event = that_channels::ChannelEvent::Error(format!("{e:#}"));
+                if !checkpoint_tool_events.is_empty() {
+                    checkpoint_tool_events.extend(tool_events);
+                }
+                let event = that_channels::ChannelEvent::Error(format!("{:#}", interrupted.error));
                 route_channel_event(
                     router.as_ref(),
                     route_channel_id.as_deref(),
@@ -775,10 +819,12 @@ pub async fn execute_agent_run_channel(
                 )
                 .await;
                 tracing::Span::current().record("otel.status_code", "error");
-                tracing::Span::current()
-                    .record("otel.status_description", format!("{e:#}").as_str());
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("{:#}", interrupted.error).as_str(),
+                );
                 crate::observability::flush_tracing();
-                return Err(e);
+                return Err(interrupted.error);
             }
         }
     }

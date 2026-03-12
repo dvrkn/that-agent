@@ -53,6 +53,17 @@ pub const STEERING_HINT_PREFIX: &str = "[hint]:";
 /// Shared type for the optional mid-run steering queue.
 pub type SteeringQueue = Arc<Mutex<Vec<String>>>;
 
+/// Captured loop state when a run fails after some turns already completed.
+///
+/// `messages` contains the fully checkpointed conversation history up to the
+/// last successfully completed tool/result step, so callers can retry without
+/// replaying side effects from earlier turns.
+pub struct InterruptedRun {
+    pub error: anyhow::Error,
+    pub messages: Vec<Message>,
+    pub usage: Usage,
+}
+
 /// Hard ceiling on tool result chars allowed into conversation context.
 /// ~8K tokens at ~4 chars/token. Generous for structured data, fatal for base64.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
@@ -112,11 +123,44 @@ pub struct LoopConfig {
 /// Returns `(final_text, aggregated_usage)` on success.
 /// Errors on unsupported provider, API failures, or max turns exceeded.
 pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result<(String, Usage)> {
-    let mut messages: Vec<Message> = config.history.clone();
+    let mut messages = config.history.clone();
     messages.push(Message::User {
         content: task.into(),
         images: config.images.clone(),
     });
+    run_from_checkpoint(config, messages, hook)
+        .await
+        .map_err(|interrupted| interrupted.error)
+}
+
+/// Run the loop and preserve completed conversation state on failure.
+pub async fn run_with_checkpoint(
+    config: &LoopConfig,
+    task: &str,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
+    let mut messages = config.history.clone();
+    messages.push(Message::User {
+        content: task.into(),
+        images: config.images.clone(),
+    });
+    run_from_checkpoint(config, messages, hook).await
+}
+
+/// Resume the loop from an exact checkpointed message chain.
+pub async fn resume_with_checkpoint(
+    config: &LoopConfig,
+    messages: Vec<Message>,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
+    run_from_checkpoint(config, messages, hook).await
+}
+
+async fn run_from_checkpoint(
+    config: &LoopConfig,
+    mut messages: Vec<Message>,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
@@ -201,9 +245,20 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         );
 
         // Keep a clone so we can record post-await fields on the same span.
-        let (text, tool_calls, usage) = run_turn(config, &messages, hook, openai_session.clone())
-            .instrument(turn_span.clone())
-            .await?;
+        let (text, tool_calls, usage) =
+            match run_turn(config, &messages, hook, openai_session.clone())
+                .instrument(turn_span.clone())
+                .await
+            {
+                Ok(ok) => ok,
+                Err(error) => {
+                    return Err(InterruptedRun {
+                        error,
+                        messages,
+                        usage: total_usage,
+                    });
+                }
+            };
 
         let llm_output_preview = llm_output_preview(&text, &tool_calls);
         let completion = if text.is_empty() && !tool_calls.is_empty() {
@@ -420,7 +475,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         debug!(turn = current, "Loop turn complete, continuing");
     }
 
-    Err(anyhow::anyhow!("max turns ({}) reached", config.max_turns))
+    Err(InterruptedRun {
+        error: anyhow::anyhow!("max turns ({}) reached", config.max_turns),
+        messages,
+        usage: total_usage,
+    })
 }
 
 /// Convenience helper for a single non-tool-use LLM call (no loop, no hooks).
