@@ -281,7 +281,10 @@ pub fn build_preamble(
     preamble.push_str(
         "## Communication\n\n\
          Your Soul.md defines your character. Your Agents.md defines how you talk to humans. \
-         Follow them — they are your voice, not suggestions.\n\n",
+         Follow them — they are your voice, not suggestions.\n\n\
+         Your messages to humans are composed messages, not work logs. Never dump raw tool \
+         output, file paths with line numbers, or verification checklists unless the human \
+         explicitly asked for that level of detail.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────

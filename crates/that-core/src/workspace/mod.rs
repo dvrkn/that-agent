@@ -478,8 +478,8 @@ Speak to humans, not logs.
 
 You have a budget of **{max_turns} tool-call turns** per conversation message.
 Each tool invocation counts as one turn. Plan your approach to stay within budget.
-When you reach roughly {warn_at} tool calls, stop and summarise what you accomplished
-and what remains.
+When you reach roughly {warn_at} tool calls, wrap up your current work and report
+results following your Communication Style.
 
 - Be efficient. Prefer bulk reads and targeted verification over noisy, repetitive calls.
 - Read before you write. Understand the existing code, config, or deployment shape first.

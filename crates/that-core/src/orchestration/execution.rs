@@ -604,9 +604,13 @@ pub async fn execute_agent_run_channel(
     );
     let channel_output_contract = format!(
         "## Channel Output\n\n\
-         Your final message goes directly to the human on `{active}`.\n\
+         Your final answer goes directly to the human on `{active}`.\n\
          Your Communication Style (from Agents.md) applies here — follow it.\n\n\
-         - Produce one final message per turn. Follow formatting instructions for `{active}` only.\n\
+         - After completing your work, deliver your final answer by calling `channel_notify`.\n\
+         Compose it as a message to a person: lead with the outcome, not the mechanics.\n\
+         - Do not rely on trailing text after your last tool call — it may not reach the channel.\n\
+         - No file paths with line numbers, no checkmark lists, no verification dumps.\n\
+         The human wants to know what happened and what is next, not see your work log.\n\
          - Self-check channel syntax before sending: no broken markdown, no unmatched fences, \
          no stray escape artifacts.\n\
          - When unsure about channel formatting, prefer plain readable text.\n\
