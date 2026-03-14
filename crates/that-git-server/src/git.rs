@@ -26,7 +26,10 @@ pub async fn info_refs(
         return Err((StatusCode::BAD_REQUEST, "invalid service".into()));
     }
 
-    let repo_path = state.ensure_repo(&repo).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let repo_path = state
+        .ensure_repo(&repo)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let output = Command::new("git")
         .arg(svc.strip_prefix("git-").unwrap())
@@ -37,7 +40,10 @@ pub async fn info_refs(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("git: {e}")))?;
 
     if !output.status.success() {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&output.stderr).into()));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&output.stderr).into(),
+        ));
     }
 
     // Build pkt-line response: service announcement + flush + refs
@@ -60,7 +66,10 @@ pub async fn upload_pack(
     Path(repo): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, (StatusCode, String)> {
-    let repo_path = state.ensure_repo(&repo).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let repo_path = state
+        .ensure_repo(&repo)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     run_service("upload-pack", &repo_path, &body).await
 }
 
@@ -84,7 +93,10 @@ pub async fn receive_pack(
         }
     }
 
-    let repo_path = state.ensure_repo(&repo).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let repo_path = state
+        .ensure_repo(&repo)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let response = run_service("receive-pack", &repo_path, &body).await?;
 
     // Post-receive: record push, fire webhook, optionally auto-merge
@@ -129,7 +141,10 @@ async fn run_service(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("git wait: {e}")))?;
 
     Ok(Response::builder()
-        .header("Content-Type", format!("application/x-git-{service}-result"))
+        .header(
+            "Content-Type",
+            format!("application/x-git-{service}-result"),
+        )
         .header("Cache-Control", "no-cache")
         .body(Body::from(output.stdout))
         .unwrap())
@@ -141,4 +156,30 @@ fn pkt_line(data: &[u8]) -> Vec<u8> {
     let mut out = format!("{len:04x}").into_bytes();
     out.extend_from_slice(data);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkt_line_encodes_correctly() {
+        // "# service=git-upload-pack\n" = 26 bytes + 4 = 30 = 0x1e
+        let result = pkt_line(b"# service=git-upload-pack\n");
+        assert_eq!(&result[..4], b"001e");
+        assert_eq!(&result[4..], b"# service=git-upload-pack\n");
+    }
+
+    #[test]
+    fn pkt_line_short_data() {
+        let result = pkt_line(b"hi");
+        assert_eq!(&result[..4], b"0006"); // 2 + 4 = 6
+        assert_eq!(&result[4..], b"hi");
+    }
+
+    #[test]
+    fn pkt_line_empty_data() {
+        let result = pkt_line(b"");
+        assert_eq!(result, b"0004"); // 0 + 4 = 4
+    }
 }

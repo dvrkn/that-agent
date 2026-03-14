@@ -912,7 +912,8 @@ pub async fn workspace_collect(
                 .json::<serde_json::Value>()
                 .await
                 .ok()
-        }.await;
+        }
+        .await;
         let conflicting_files = conflicts
             .as_ref()
             .and_then(|c| c.get("conflicting_files"))

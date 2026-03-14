@@ -2502,7 +2502,9 @@ async fn dispatch_inner(
         }
         "workspace_activity" => {
             #[derive(Deserialize)]
-            struct Args { repo: Option<String> }
+            struct Args {
+                repo: Option<String>,
+            }
             let args: Args = serde_json::from_str(args_json).unwrap_or(Args { repo: None });
             crate::agents::workspace_activity(args.repo.as_deref())
                 .await
@@ -2510,7 +2512,10 @@ async fn dispatch_inner(
         }
         "workspace_diff" => {
             #[derive(Deserialize)]
-            struct Args { branch: String, repo: Option<String> }
+            struct Args {
+                branch: String,
+                repo: Option<String>,
+            }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             crate::agents::workspace_branch_diff(&args.branch, args.repo.as_deref())
@@ -2519,7 +2524,10 @@ async fn dispatch_inner(
         }
         "workspace_conflicts" => {
             #[derive(Deserialize)]
-            struct Args { branch: String, repo: Option<String> }
+            struct Args {
+                branch: String,
+                repo: Option<String>,
+            }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             crate::agents::workspace_conflicts(&args.branch, args.repo.as_deref())

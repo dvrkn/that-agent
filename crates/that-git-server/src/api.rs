@@ -11,12 +11,12 @@ use tokio::process::Command;
 use crate::state::AppState;
 
 #[derive(Serialize)]
-pub(crate) struct RepoInfo {
+pub struct RepoInfo {
     name: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct BranchInfo {
+pub struct BranchInfo {
     name: String,
     ahead: u32,
     behind: u32,
@@ -24,7 +24,7 @@ pub(crate) struct BranchInfo {
 }
 
 #[derive(Serialize)]
-pub(crate) struct Activity {
+pub struct Activity {
     repo: String,
     branches: Vec<BranchInfo>,
 }
@@ -52,9 +52,19 @@ pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     Path(repo): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    state.ensure_repo(&repo).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let name = if repo.ends_with(".git") { repo } else { format!("{repo}.git") };
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "name": name, "created": true }))))
+    state
+        .ensure_repo(&repo)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let name = if repo.ends_with(".git") {
+        repo
+    } else {
+        format!("{repo}.git")
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "name": name, "created": true })),
+    ))
 }
 
 /// DELETE /api/repos/{repo} — remove a repo
@@ -62,7 +72,9 @@ pub async fn delete_repo(
     State(state): State<Arc<AppState>>,
     Path(repo): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let path = state.repo_path(&repo).ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
+    let path = state
+        .repo_path(&repo)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
     if !path.exists() {
         return Err((StatusCode::NOT_FOUND, "repo not found".into()));
     }
@@ -77,17 +89,25 @@ pub async fn repo_activity(
     State(state): State<Arc<AppState>>,
     Path(repo): Path<String>,
 ) -> Result<Json<Activity>, (StatusCode, String)> {
-    let path = state.repo_path(&repo).ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
+    let path = state
+        .repo_path(&repo)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
     if !path.exists() {
         return Err((StatusCode::NOT_FOUND, "repo not found".into()));
     }
 
     let branch_out = Command::new("git")
-        .arg("-C").arg(&path)
+        .arg("-C")
+        .arg(&path)
         .args(["branch", "--format=%(refname:short)"])
         .output()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("git branch: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git branch: {e}"),
+            )
+        })?;
 
     let branch_list = String::from_utf8_lossy(&branch_out.stdout);
     let mut branches = Vec::new();
@@ -100,18 +120,27 @@ pub async fn repo_activity(
         };
 
         let last_commit = Command::new("git")
-            .arg("-C").arg(&path)
+            .arg("-C")
+            .arg(&path)
             .args(["log", "-1", "--format=%H %ci %s", name])
             .output()
             .await
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
 
-        branches.push(BranchInfo { name: name.to_string(), ahead, behind, last_commit });
+        branches.push(BranchInfo {
+            name: name.to_string(),
+            ahead,
+            behind,
+            last_commit,
+        });
     }
 
     let repo_name = repo.trim_end_matches(".git").to_string();
-    Ok(Json(Activity { repo: repo_name, branches }))
+    Ok(Json(Activity {
+        repo: repo_name,
+        branches,
+    }))
 }
 
 /// GET /api/repos/{repo}/diff/{*branch} — unified diff of branch vs main
@@ -119,30 +148,39 @@ pub async fn branch_diff(
     State(state): State<Arc<AppState>>,
     Path((repo, branch)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let path = state.repo_path(&repo).ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
+    let path = state
+        .repo_path(&repo)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
     if !path.exists() {
         return Err((StatusCode::NOT_FOUND, "repo not found".into()));
     }
 
     let output = Command::new("git")
-        .arg("-C").arg(&path)
+        .arg("-C")
+        .arg(&path)
         .args(["diff", &format!("main...{branch}")])
         .output()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff: {e}")))?;
 
     if !output.status.success() {
-        return Err((StatusCode::BAD_REQUEST, String::from_utf8_lossy(&output.stderr).into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&output.stderr).into(),
+        ));
     }
 
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
         output.stdout,
     ))
 }
 
 #[derive(Serialize)]
-pub(crate) struct ConflictInfo {
+pub struct ConflictInfo {
     repo: String,
     base: String,
     branch: String,
@@ -156,18 +194,26 @@ pub async fn branch_conflicts(
     State(state): State<Arc<AppState>>,
     Path((repo, branch)): Path<(String, String)>,
 ) -> Result<Json<ConflictInfo>, (StatusCode, String)> {
-    let path = state.repo_path(&repo).ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
+    let path = state
+        .repo_path(&repo)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid repo name".into()))?;
     if !path.exists() {
         return Err((StatusCode::NOT_FOUND, "repo not found".into()));
     }
 
     // merge-tree --write-tree outputs conflicting file info on failure (git 2.38+)
     let mt = Command::new("git")
-        .arg("-C").arg(&path)
+        .arg("-C")
+        .arg(&path)
         .args(["merge-tree", "--write-tree", "--name-only", "main", &branch])
         .output()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("merge-tree: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("merge-tree: {e}"),
+            )
+        })?;
 
     let conflicting_files = if mt.status.success() {
         vec![] // no conflicts
@@ -183,7 +229,8 @@ pub async fn branch_conflicts(
 
     // What the branch changed vs merge-base
     let diff_branch = Command::new("git")
-        .arg("-C").arg(&path)
+        .arg("-C")
+        .arg(&path)
         .args(["diff", &format!("main...{branch}")])
         .output()
         .await
@@ -192,7 +239,8 @@ pub async fn branch_conflicts(
 
     // What main changed since the branch diverged
     let diff_main = Command::new("git")
-        .arg("-C").arg(&path)
+        .arg("-C")
+        .arg(&path)
         .args(["diff", &format!("{branch}...main")])
         .output()
         .await
@@ -212,8 +260,14 @@ pub async fn branch_conflicts(
 
 async fn ahead_behind(repo_path: &std::path::Path, branch: &str) -> (u32, u32) {
     let out = Command::new("git")
-        .arg("-C").arg(repo_path)
-        .args(["rev-list", "--left-right", "--count", &format!("{branch}...main")])
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{branch}...main"),
+        ])
         .output()
         .await;
     match out {

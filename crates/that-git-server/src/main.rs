@@ -1,16 +1,13 @@
-mod acl;
-mod api;
-mod expiry;
-mod git;
-mod hooks;
-mod state;
-
 use clap::Parser;
 use std::sync::Arc;
+use that_git_server::{api, expiry, git, state};
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "that-git-server", about = "Git Smart HTTP server for multi-agent coordination")]
+#[command(
+    name = "that-git-server",
+    about = "Git Smart HTTP server for multi-agent coordination"
+)]
 struct Args {
     /// Bind address
     #[arg(long, env = "THAT_GIT_BIND_ADDR", default_value = "0.0.0.0:9418")]
@@ -39,10 +36,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_env_filter("that_git_server=info").init();
+    tracing_subscriber::fmt()
+        .with_env_filter("that_git_server=info")
+        .init();
 
     let args = Args::parse();
-    tokio::fs::create_dir_all(&args.repo_root).await.expect("cannot create repo root");
+    tokio::fs::create_dir_all(&args.repo_root)
+        .await
+        .expect("cannot create repo root");
 
     let state = Arc::new(state::AppState::new(
         args.repo_root,
@@ -56,18 +57,38 @@ async fn main() {
     let app = axum::Router::new()
         // Git Smart HTTP
         .route("/{repo}/info/refs", axum::routing::get(git::info_refs))
-        .route("/{repo}/git-upload-pack", axum::routing::post(git::upload_pack))
-        .route("/{repo}/git-receive-pack", axum::routing::post(git::receive_pack))
+        .route(
+            "/{repo}/git-upload-pack",
+            axum::routing::post(git::upload_pack),
+        )
+        .route(
+            "/{repo}/git-receive-pack",
+            axum::routing::post(git::receive_pack),
+        )
         // REST API
         .route("/api/repos", axum::routing::get(api::list_repos))
-        .route("/api/repos/{repo}", axum::routing::post(api::create_repo).delete(api::delete_repo))
-        .route("/api/repos/{repo}/activity", axum::routing::get(api::repo_activity))
-        .route("/api/repos/{repo}/diff/{*branch}", axum::routing::get(api::branch_diff))
-        .route("/api/repos/{repo}/conflicts/{*branch}", axum::routing::get(api::branch_conflicts))
+        .route(
+            "/api/repos/{repo}",
+            axum::routing::post(api::create_repo).delete(api::delete_repo),
+        )
+        .route(
+            "/api/repos/{repo}/activity",
+            axum::routing::get(api::repo_activity),
+        )
+        .route(
+            "/api/repos/{repo}/diff/{*branch}",
+            axum::routing::get(api::branch_diff),
+        )
+        .route(
+            "/api/repos/{repo}/conflicts/{*branch}",
+            axum::routing::get(api::branch_conflicts),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&args.bind).await.expect("bind failed");
+    let listener = tokio::net::TcpListener::bind(&args.bind)
+        .await
+        .expect("bind failed");
     info!("listening on {}", args.bind);
     axum::serve(listener, app).await.expect("server error");
 }

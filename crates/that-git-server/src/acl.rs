@@ -117,4 +117,81 @@ mod tests {
         }];
         assert!(check(&refs, "worker-1").is_err());
     }
+
+    #[test]
+    fn parse_multiple_refs() {
+        let mut body = make_pkt_line(
+            "0000000000000000000000000000000000000000 aaaa refs/heads/task/w1\0 caps",
+        );
+        body.extend(make_pkt_line(
+            "1111111111111111111111111111111111111111 bbbb refs/heads/task/w1-sub",
+        ));
+        body.extend(b"0000");
+
+        let refs = parse_ref_commands(&body);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].refname, "refs/heads/task/w1");
+        assert_eq!(refs[1].refname, "refs/heads/task/w1-sub");
+    }
+
+    #[test]
+    fn parse_no_capabilities() {
+        let mut body =
+            make_pkt_line("0000000000000000000000000000000000000000 ffff refs/heads/main");
+        body.extend(b"0000");
+
+        let refs = parse_ref_commands(&body);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].refname, "refs/heads/main");
+        assert_eq!(refs[0].new, "ffff");
+    }
+
+    #[test]
+    fn parse_empty_body() {
+        assert!(parse_ref_commands(b"").is_empty());
+        assert!(parse_ref_commands(b"0000").is_empty());
+    }
+
+    #[test]
+    fn parse_malformed_body() {
+        // Too short to be a valid pkt-line
+        assert!(parse_ref_commands(b"00").is_empty());
+        // Valid pkt-line but only 2 parts (not enough for old/new/ref)
+        let body = make_pkt_line("only two-parts");
+        assert!(parse_ref_commands(&body).is_empty());
+    }
+
+    #[test]
+    fn acl_allows_subbranch() {
+        // task/worker-1/feature should be allowed for worker-1
+        let refs = vec![RefCommand {
+            old: "0".repeat(40),
+            new: "a".repeat(40),
+            refname: "refs/heads/task/worker-1/feature-x".into(),
+        }];
+        assert!(check(&refs, "worker-1").is_ok());
+    }
+
+    #[test]
+    fn acl_empty_refs_passes() {
+        assert!(check(&[], "worker-1").is_ok());
+    }
+
+    #[test]
+    fn acl_mixed_refs_fails_on_first_violation() {
+        let refs = vec![
+            RefCommand {
+                old: "0".repeat(40),
+                new: "a".repeat(40),
+                refname: "refs/heads/task/worker-1".into(),
+            },
+            RefCommand {
+                old: "0".repeat(40),
+                new: "b".repeat(40),
+                refname: "refs/heads/main".into(),
+            },
+        ];
+        let err = check(&refs, "worker-1").unwrap_err();
+        assert!(err.contains("main"));
+    }
 }
