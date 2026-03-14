@@ -4,9 +4,12 @@ kind: Kustomization
 resources:
   - serviceaccount.yaml
   - role.yaml
+  - role-child-readonly.yaml
+  - role-child-sandbox.yaml
   - rolebinding.yaml
   - clusterrole.yaml
   - clusterrolebinding.yaml
+  - network-policy.yaml
   - pvc.yaml
   - configmap.yaml
   - gateway-service.yaml

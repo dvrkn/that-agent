@@ -25,7 +25,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: that-agent
-          image: ghcr.io/that-labs/that-agent:v0.2.0
+          image: ghcr.io/that-labs/that-agent:latest
           imagePullPolicy: Always
           securityContext:
             runAsUser: 1000
@@ -174,6 +174,106 @@ spec:
               mountPath: /opt/buildkit/bin
             - name: buildkit-state
               mountPath: /home/user/.local/share/buildkit
+        - name: git-server
+          image: ghcr.io/that-labs/that-agent:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              REPO_DIR=/repos/workspace.git
+              mkdir -p "${REPO_DIR}"
+              cd "${REPO_DIR}"
+              git init --bare --quiet
+              git config http.receivepack true
+              export GIT_PROJECT_ROOT=/repos
+              export GIT_HTTP_EXPORT_ALL=1
+              exec python3 -c "
+              import http.server, subprocess, os, sys
+              os.chdir('/repos')
+              class GitHTTPHandler(http.server.CGIHTTPRequestHandler):
+                  cgi_directories = ['/']
+                  have_fork = False
+                  def translate_path(self, path):
+                      return '/usr/lib/git-core/git-http-backend'
+              http.server.HTTPServer(('0.0.0.0', 9418), GitHTTPHandler).serve_forever()
+              "
+          ports:
+            - containerPort: 9418
+              name: git-http
+          volumeMounts:
+            - name: git-repos
+              mountPath: /repos
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+        - name: cache-proxy
+          image: ghcr.io/that-labs/that-agent:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /var/cache/proxy
+              if command -v squid >/dev/null 2>&1; then
+                cat > /tmp/squid.conf <<'CONF'
+              http_port 3128
+              cache_dir ufs /var/cache/proxy 4096 16 256
+              maximum_object_size 512 MB
+              cache_mem 256 MB
+              access_log none
+              http_access allow all
+              CONF
+                exec squid -N -f /tmp/squid.conf
+              else
+                echo "squid not available, running minimal TCP proxy passthrough"
+                exec python3 -c "
+              import socketserver, socket, threading, sys
+              class ProxyHandler(socketserver.StreamRequestHandler):
+                  def handle(self):
+                      line = self.rfile.readline(65537)
+                      if b'CONNECT' in line:
+                          host_port = line.split()[1].decode()
+                          host, port = host_port.rsplit(':', 1)
+                          try:
+                              remote = socket.create_connection((host, int(port)), timeout=10)
+                              self.wfile.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                              self.wfile.flush()
+                              def forward(src, dst):
+                                  try:
+                                      while True:
+                                          data = src.recv(65536)
+                                          if not data: break
+                                          dst.sendall(data)
+                                  except: pass
+                              t = threading.Thread(target=forward, args=(remote, self.request))
+                              t.daemon = True
+                              t.start()
+                              forward(self.request, remote)
+                              remote.close()
+                          except Exception as e:
+                              self.wfile.write(f'HTTP/1.1 502 Bad Gateway\r\n\r\n{e}'.encode())
+              server = socketserver.ThreadingTCPServer(('0.0.0.0', 3128), ProxyHandler)
+              server.serve_forever()
+              "
+              fi
+          ports:
+            - containerPort: 3128
+              name: cache-proxy
+          volumeMounts:
+            - name: proxy-cache
+              mountPath: /var/cache/proxy
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "512Mi"
       volumes:
         - name: agent-home
           persistentVolumeClaim:
@@ -191,3 +291,9 @@ spec:
           configMap:
             name: that-agent-entrypoint
             defaultMode: 493
+        - name: git-repos
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: proxy-cache
+          emptyDir:
+            sizeLimit: 8Gi

@@ -354,6 +354,25 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                         lines.push(format!("image_build_backend: {selected}"));
                     }
                     append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
+                    lines.push("multi_agent_enabled: true".to_string());
+                    if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("agent_image: {img}"));
+                    }
+                    if let Some(cpu) = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("child_cpu_limit: {cpu}"));
+                    }
+                    if let Some(mem) = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("child_memory_limit: {mem}"));
+                    }
                 }
                 that_sandbox::backend::SandboxMode::Docker => {
                     lines.push("runtime_backend: local_trusted".to_string());
@@ -406,6 +425,25 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                 lines.push(format!("image_build_backend: {selected}"));
             }
             append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
+            lines.push("multi_agent_enabled: true".to_string());
+            if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("agent_image: {img}"));
+            }
+            if let Some(cpu) = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("child_cpu_limit: {cpu}"));
+            }
+            if let Some(mem) = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("child_memory_limit: {mem}"));
+            }
         }
     }
 
