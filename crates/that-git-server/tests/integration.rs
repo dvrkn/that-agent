@@ -108,11 +108,23 @@ async fn git_clone_push_fetch_cycle() {
     // Clone into a new directory
     let clone_dir = tmp.path().join("clone");
     git(
-        &["clone", &server_url, clone_dir.to_str().unwrap()],
+        &[
+            "clone",
+            "--branch",
+            "main",
+            &server_url,
+            clone_dir.to_str().unwrap(),
+        ],
         tmp.path(),
     )
     .await;
-    assert!(clone_dir.join("hello.txt").exists());
+    assert!(
+        clone_dir.join("hello.txt").exists(),
+        "hello.txt not found in clone dir; contents: {:?}",
+        std::fs::read_dir(&clone_dir).map(|d| d
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect::<Vec<_>>())
+    );
     let content = std::fs::read_to_string(clone_dir.join("hello.txt")).unwrap();
     assert_eq!(content, "hello world");
 

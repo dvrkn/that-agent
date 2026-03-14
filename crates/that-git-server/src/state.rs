@@ -46,7 +46,7 @@ impl AppState {
         let path = self.repo_path(repo).ok_or("invalid repo name")?;
         if !path.exists() {
             let out = tokio::process::Command::new("git")
-                .args(["init", "--bare", "--quiet"])
+                .args(["init", "--bare", "--quiet", "--initial-branch=main"])
                 .arg(&path)
                 .output()
                 .await
