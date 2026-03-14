@@ -445,22 +445,7 @@ pub async fn run_ephemeral_agent_k8s(
     let role_str = role.unwrap_or("");
 
     if workspace {
-        // Ensure bare repo exists on git-server
-        let _ = tokio::process::Command::new("kubectl")
-            .args([
-                "exec",
-                "-n",
-                &ns,
-                "-lapp.kubernetes.io/component=git-server",
-                "--",
-                "bash",
-                "-c",
-                "test -d /repos/workspace.git || \
-                 (git init --bare /repos/workspace.git && \
-                  git -C /repos/workspace.git config http.receivepack true)",
-            ])
-            .output()
-            .await;
+        // Push workspace to git-server (auto-inits bare repo on first access)
         let _ = tokio::process::Command::new("git")
             .args([
                 "-C",
@@ -827,27 +812,7 @@ pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serd
 
     let repo_url = format!("{git_svc}/{name}.git");
 
-    // Create bare repo on git-server pod if it doesn't exist
-    let git_pod_selector = "app.kubernetes.io/component=git-server";
-    let _ = tokio::process::Command::new("kubectl")
-        .args([
-            "exec",
-            "-n",
-            &ns,
-            &format!("-l{git_pod_selector}"),
-            "--",
-            "bash",
-            "-c",
-            &format!(
-                "test -d /repos/{name}.git || \
-                 (git init --bare /repos/{name}.git && \
-                  git -C /repos/{name}.git config http.receivepack true)"
-            ),
-        ])
-        .output()
-        .await;
-
-    // Push current state to git-server over HTTP
+    // Push current state to git-server (auto-inits bare repo on first access)
     let push = tokio::process::Command::new("git")
         .args(["-C", path, "push", &repo_url, "HEAD:main", "--force"])
         .output()
