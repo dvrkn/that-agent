@@ -429,7 +429,8 @@ pub async fn run_ephemeral_agent_k8s(
         std::env::var("THAT_K8S_DEPLOYMENT_NAME").unwrap_or_else(|_| "that-agent".to_string());
     let parent_gw = crate::orchestration::support::resolve_gateway_url();
     let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
-    let parent_svc = std::env::var("THAT_K8S_SERVICE_NAME").unwrap_or_else(|_| "that-agent".into());
+    let git_svc = git_server_url(&ns);
+    let proxy_svc = cache_proxy_url(&ns);
 
     let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let model_str = model
@@ -449,17 +450,17 @@ pub async fn run_ephemeral_agent_k8s(
 
     let mut extra_env = String::new();
     if workspace {
-        let git_url = format!("http://{parent_svc}.{ns}.svc.cluster.local:9418/workspace.git");
+        let git_url = format!("{git_svc}/workspace.git");
         extra_env.push_str(&format!(
             "  GIT_REPO_URL: \"{git_url}\"\n  GIT_BRANCH: \"task/{safe_name}\"\n"
         ));
-        // Push current state to bare repo + create task branch
+        // Push current state to git-server via HTTP
         let _ = tokio::process::Command::new("git")
             .args([
                 "-C",
                 "/workspace",
                 "push",
-                "/repos/workspace.git",
+                &format!("{git_svc}/workspace.git"),
                 &format!("HEAD:refs/heads/task/{safe_name}"),
                 "--force",
             ])
@@ -468,7 +469,7 @@ pub async fn run_ephemeral_agent_k8s(
     }
 
     // Proxy env for build cache
-    let proxy_url = format!("http://{parent_svc}.{ns}.svc.cluster.local:3128");
+    let proxy_url = &proxy_svc;
     let no_proxy = "*.svc.cluster.local,10.0.0.0/8";
 
     let yaml = format!(
@@ -652,7 +653,7 @@ spec:
                 "-C",
                 "/workspace",
                 "fetch",
-                "/repos/workspace.git",
+                &format!("{git_svc}/workspace.git"),
                 &format!("task/{safe_name}"),
             ])
             .output()
@@ -786,10 +787,10 @@ pub async fn unregister_agent_k8s(name: &str) -> Result<serde_json::Value> {
 
 // ── Workspace sharing ────────────────────────────────────────────────────────
 
-/// Push a local git repo to the in-cluster git sidecar for child access.
+/// Push a local git repo to the in-cluster git server for child access.
 pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
-    let parent_svc = std::env::var("THAT_K8S_SERVICE_NAME").unwrap_or_else(|_| "that-agent".into());
+    let git_svc = git_server_url(&ns);
 
     // Validate it's a git repo
     let check = tokio::process::Command::new("git")
@@ -808,31 +809,18 @@ pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serd
             .unwrap_or("workspace")
     });
 
-    let bare_path = format!("/repos/{name}.git");
+    let repo_url = format!("{git_svc}/{name}.git");
 
-    // Init bare repo if needed (via kubectl exec into the git-server sidecar)
-    let _ = tokio::process::Command::new("bash")
-        .args([
-            "-c",
-            &format!(
-                "mkdir -p {bare_path} && cd {bare_path} && git init --bare --quiet 2>/dev/null; \
-                 git config http.receivepack true"
-            ),
-        ])
-        .output()
-        .await;
-
-    // Push current state
+    // Push current state to git-server over HTTP
     let push = tokio::process::Command::new("git")
-        .args(["-C", path, "push", &bare_path, "HEAD:main", "--force"])
+        .args(["-C", path, "push", &repo_url, "HEAD:main", "--force"])
         .output()
         .await?;
-    anyhow::ensure!(push.status.success(), "git push to bare repo failed");
+    anyhow::ensure!(push.status.success(), "git push to git-server failed");
 
-    let clone_url = format!("http://{parent_svc}.{ns}.svc.cluster.local:9418/{name}.git");
     Ok(serde_json::json!({
         "name": name,
-        "clone_url": clone_url,
+        "clone_url": repo_url,
     }))
 }
 
@@ -842,12 +830,15 @@ pub async fn workspace_collect(
     worker: &str,
     strategy: &str,
 ) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let git_svc = git_server_url(&ns);
     let safe_worker = sanitize_name(worker);
     let branch = format!("task/{safe_worker}");
+    let repo_url = format!("{git_svc}/workspace.git");
 
     // Fetch the worker's branch
     let fetch = tokio::process::Command::new("git")
-        .args(["-C", path, "fetch", "/repos/workspace.git", &branch])
+        .args(["-C", path, "fetch", &repo_url, &branch])
         .output()
         .await?;
     anyhow::ensure!(fetch.status.success(), "git fetch failed");
@@ -888,14 +879,7 @@ pub async fn workspace_collect(
 
         // Clean up task branch
         let _ = tokio::process::Command::new("git")
-            .args([
-                "-C",
-                path,
-                "push",
-                "/repos/workspace.git",
-                "--delete",
-                &branch,
-            ])
+            .args(["-C", path, "push", &repo_url, "--delete", &branch])
             .output()
             .await;
 
@@ -939,6 +923,18 @@ fn build_config_toml(
         ));
     }
     out
+}
+
+/// Resolve the git-server Service URL (independent pod).
+fn git_server_url(ns: &str) -> String {
+    std::env::var("THAT_GIT_SERVER_URL")
+        .unwrap_or_else(|_| format!("http://that-agent-git-server.{ns}.svc.cluster.local:9418"))
+}
+
+/// Resolve the cache-proxy Service URL (independent pod).
+fn cache_proxy_url(ns: &str) -> String {
+    std::env::var("THAT_CACHE_PROXY_URL")
+        .unwrap_or_else(|_| format!("http://that-agent-cache-proxy.{ns}.svc.cluster.local:3128"))
 }
 
 /// Derive the cluster directory from the memory DB path.

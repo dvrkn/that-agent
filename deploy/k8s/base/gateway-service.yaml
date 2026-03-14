@@ -10,9 +10,3 @@ spec:
     - name: gateway
       port: 8080
       targetPort: 8080
-    - name: git-http
-      port: 9418
-      targetPort: 9418
-    - name: cache-proxy
-      port: 3128
-      targetPort: 3128

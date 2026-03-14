@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: that-agent-git-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: that-agent
+      app.kubernetes.io/component: git-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: that-agent
+        app.kubernetes.io/component: git-server
+    spec:
+      containers:
+        - name: git-server
+          image: ghcr.io/that-labs/that-agent:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              REPO_DIR=/repos/workspace.git
+              mkdir -p "${REPO_DIR}"
+              cd "${REPO_DIR}"
+              git init --bare --quiet
+              git config http.receivepack true
+              export GIT_PROJECT_ROOT=/repos
+              export GIT_HTTP_EXPORT_ALL=1
+              exec python3 -c "
+              import http.server, subprocess, os, sys
+              os.chdir('/repos')
+              class GitHTTPHandler(http.server.CGIHTTPRequestHandler):
+                  cgi_directories = ['/']
+                  have_fork = False
+                  def translate_path(self, path):
+                      return '/usr/lib/git-core/git-http-backend'
+              http.server.HTTPServer(('0.0.0.0', 9418), GitHTTPHandler).serve_forever()
+              "
+          ports:
+            - containerPort: 9418
+              name: git-http
+          volumeMounts:
+            - name: git-repos
+              mountPath: /repos
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      volumes:
+        - name: git-repos
+          emptyDir:
+            sizeLimit: 4Gi
