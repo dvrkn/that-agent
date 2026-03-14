@@ -1,5 +1,6 @@
 //! Agent lifecycle management — spawn, list, and query peer agents.
 //!
+//! In Kubernetes mode, agents are K8s Deployments (persistent) or Jobs (ephemeral).
 //! Agents registered here persist across sessions via a file-backed registry
 //! at `~/.that-agent/cluster/agents.json`. The spawning agent writes a
 //! `config.toml` for the child and starts the binary in the background.
