@@ -749,14 +749,28 @@ pub async fn list_agents_k8s() -> Result<serde_json::Value> {
 // ── K8s Agent Query ──────────────────────────────────────────────────────────
 
 /// Query a persistent agent by resolving its K8s Service DNS.
+/// If the target is the parent agent, use THAT_PARENT_GATEWAY_URL directly.
+/// Otherwise construct a cross-namespace DNS name using the parent's namespace
+/// (siblings are deployed in the same namespace as the parent).
 pub async fn query_agent_k8s(
     name: &str,
     message: &str,
     timeout_secs: u64,
 ) -> Result<serde_json::Value> {
-    let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
-    let gateway_url = format!("http://that-agent-{safe_name}.{ns}.svc.cluster.local:8080");
+    let parent_name = std::env::var("THAT_AGENT_PARENT").unwrap_or_default();
+
+    let gateway_url = if !parent_name.is_empty() && sanitize_name(&parent_name) == safe_name {
+        // Querying our parent — use the known gateway URL
+        std::env::var("THAT_PARENT_GATEWAY_URL").unwrap_or_else(|_| {
+            let ns = k8s_namespace();
+            format!("http://that-agent-{safe_name}.{ns}.svc.cluster.local:8080")
+        })
+    } else {
+        // Querying a sibling or other agent — use the parent's namespace (where agents live)
+        let ns = std::env::var("THAT_SANDBOX_K8S_NAMESPACE").unwrap_or_else(|_| k8s_namespace());
+        format!("http://that-agent-{safe_name}.{ns}.svc.cluster.local:8080")
+    };
 
     // Retry with backoff for DNS propagation
     let mut last_err = None;
