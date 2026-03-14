@@ -2308,15 +2308,12 @@ async fn dispatch_inner(
                     .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
                 let timeout = args.timeout_secs.unwrap_or(300);
                 let mut cmd = tokio::process::Command::new(&binary);
-                cmd.arg("--agent")
-                    .arg(&args.name)
-                    .arg("run")
-                    .arg("query")
-                    .arg("--task")
-                    .arg(&args.task);
+                cmd.arg("--agent").arg(&args.name).arg("run").arg("query");
                 if let Some(ref role) = args.role {
                     cmd.arg("--role").arg(role);
                 }
+                // Task is a positional arg — must come last
+                cmd.arg(&args.task);
                 cmd.env(
                     "THAT_PARENT_GATEWAY_URL",
                     crate::orchestration::support::resolve_gateway_url(),

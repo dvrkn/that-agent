@@ -565,7 +565,7 @@ pub async fn run_ephemeral_agent_k8s(
                                 "name": "agent",
                                 "image": image,
                                 "command": ["that", "--agent", name, "run", "query",
-                                            "--task", task, "--parent", parent, "--no-sandbox"],
+                                            "--parent", parent, "--no-sandbox", task],
                                 "envFrom": [
                                     { "configMapRef": { "name": format!("{sa_name}-config") } },
                                     { "secretRef": { "name": "that-agent-secrets", "optional": true } },
