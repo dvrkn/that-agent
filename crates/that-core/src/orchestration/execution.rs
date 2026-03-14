@@ -6,8 +6,9 @@ use tracing::warn;
 use crate::agent_loop::{self, LoopConfig, Message, SteeringQueue, ToolContext};
 use crate::config::AgentDef;
 use crate::hooks::{
-    channel_notify_tool_def, channel_send_file_tool_def, channel_send_message_tool_def,
-    channel_send_raw_tool_def, channel_settings_tool_def, ChannelHook,
+    channel_answer_tool_def, channel_notify_tool_def, channel_send_file_tool_def,
+    channel_send_message_tool_def, channel_send_raw_tool_def, channel_settings_tool_def,
+    ChannelHook,
 };
 use crate::tools::all_tool_defs;
 
@@ -587,7 +588,7 @@ pub async fn execute_agent_run_channel(
          ## Gateway\n\n\
          Your HTTP gateway is always listening at `{gateway_url}`.\n\
          - `POST {gateway_url}/v1/inbound` — async fire-and-forget (returns 202). Triggers a background agent run. \
-         Use this from plugins and services. Response delivered via `callback_url` or `channel_notify`.\n\
+         Use this from plugins and services. Response delivered via `callback_url` or `answer`.\n\
          - `POST {gateway_url}/v1/chat` — synchronous (blocks until done). Only for one-shot queries that need inline response. \
          Never use from plugins — it blocks the caller and makes tool calls visible on the user's channel.\n\
          - `POST {gateway_url}/v1/notify` — zero-cost queue (returns 202). No LLM turn, batched into next heartbeat.\n\
@@ -606,8 +607,10 @@ pub async fn execute_agent_run_channel(
         "## Channel Output\n\n\
          Your final answer goes directly to the human on `{active}`.\n\
          Your Communication Style (from Agents.md) applies here — follow it.\n\n\
-         - After completing your work, deliver your final answer by calling `channel_notify`.\n\
-         Compose it as a message to a person: lead with the outcome, not the mechanics.\n\
+         - After completing your work, deliver your final answer by calling `answer`.\n\
+         It must be the **last** tool you call. The message is delivered with proper \
+         channel formatting.\n\
+         - Use `channel_notify` only for mid-turn progress updates, not for the final answer.\n\
          - Do not rely on trailing text after your last tool call — it may not reach the channel.\n\
          - No file paths with line numbers, no checkmark lists, no verification dumps.\n\
          The human wants to know what happened and what is next, not see your work log.\n\
@@ -690,6 +693,8 @@ pub async fn execute_agent_run_channel(
         // Add channel-specific tools: ChannelHook intercepts calls and routes them
         // to the router without hitting dispatch().
         let mut tools = all_tool_defs(&container);
+        let answer_fmt = router.format_instructions_for(active_channel).await;
+        tools.push(channel_answer_tool_def(&answer_fmt));
         tools.push(channel_notify_tool_def());
         tools.push(channel_send_file_tool_def());
         tools.push(channel_send_message_tool_def());
@@ -835,7 +840,10 @@ pub async fn execute_agent_run_channel(
                 tracing::Span::current().record("otel.status_code", "ok");
                 tracing::Span::current().record("otel.status_description", "agent run completed");
                 crate::observability::flush_tracing();
-                if !suppress_output {
+                if !suppress_output
+                    && !last_tool_was_answer(&tool_events)
+                    && !last_tool_was_channel_notify(&tool_events)
+                {
                     let event = that_channels::ChannelEvent::Done {
                         text: text.clone(),
                         input_tokens: usage.input_tokens as u64,

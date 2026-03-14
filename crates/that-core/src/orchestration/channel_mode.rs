@@ -541,6 +541,9 @@ pub async fn run_listen(
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
     // Queued __notify__ messages drained each heartbeat tick.
     let notification_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Queued deferred inbound messages drained each heartbeat tick.
+    let inbound_queue: Arc<Mutex<Vec<that_channels::InboundMessage>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     eprintln!(
         "[that] Listening on channels: {} (primary: {})\n[that] Agent: {} — Ctrl+C to stop.",
@@ -697,6 +700,7 @@ pub async fn run_listen(
         let channel_registry_hb = Arc::clone(&channel_registry);
         let route_registry_hb = Arc::clone(&route_registry);
         let notification_queue_hb = Arc::clone(&notification_queue);
+        let inbound_queue_hb = Arc::clone(&inbound_queue);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -866,11 +870,14 @@ pub async fn run_listen(
 
                 let pending_notifs: Vec<String> =
                     std::mem::take(&mut *notification_queue_hb.lock().await);
+                let pending_inbound: Vec<that_channels::InboundMessage> =
+                    std::mem::take(&mut *inbound_queue_hb.lock().await);
 
                 if due_indices.is_empty()
                     && unscoped_plugin_tasks.is_empty()
                     && scoped_plugin_tasks.is_empty()
                     && pending_notifs.is_empty()
+                    && pending_inbound.is_empty()
                 {
                     continue;
                 }
@@ -905,8 +912,12 @@ pub async fn run_listen(
                 if !due_refs.is_empty()
                     || !unscoped_plugin_tasks.is_empty()
                     || !pending_notifs.is_empty()
+                    || !pending_inbound.is_empty()
                 {
-                    let mut task = if due_refs.is_empty() && pending_notifs.is_empty() {
+                    let mut task = if due_refs.is_empty()
+                        && pending_notifs.is_empty()
+                        && pending_inbound.is_empty()
+                    {
                         String::from(
                             "Heartbeat check-in. Process the following plugin-triggered items:\n\n",
                         )
@@ -920,6 +931,51 @@ pub async fn run_listen(
                         task.push_str("\n\n## Pending agent notifications:\n");
                         for n in &pending_notifs {
                             task.push_str(&format!("- {n}\n"));
+                        }
+                    }
+                    if !pending_inbound.is_empty() {
+                        task.push_str("\n\n## Pending inbound requests:\n");
+                        for m in &pending_inbound {
+                            let text_preview: String = m.text.chars().take(500).collect();
+                            let cb = m.callback_url.as_deref().unwrap_or("no callback");
+                            let attach_count = m.attachments.len();
+                            task.push_str(&format!(
+                                "- [sender: {}] {} (callback: {}) [{} attachments]\n",
+                                m.sender_id, text_preview, cb, attach_count
+                            ));
+                        }
+
+                        const INBOUND_BATCH_WARN_THRESHOLD: usize = 10;
+                        if pending_inbound.len() > INBOUND_BATCH_WARN_THRESHOLD {
+                            let mut sender_counts: std::collections::HashMap<&str, usize> =
+                                std::collections::HashMap::new();
+                            for m in &pending_inbound {
+                                *sender_counts.entry(&m.sender_id).or_default() += 1;
+                            }
+                            let breakdown: String = sender_counts
+                                .iter()
+                                .map(|(s, c)| format!("{s}: {c}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            warn!(
+                                count = pending_inbound.len(),
+                                breakdown = %breakdown,
+                                "High inbound batch volume"
+                            );
+                            let warning_msg = format!(
+                                "Budget warning: {} inbound requests batched this tick. Breakdown: {}",
+                                pending_inbound.len(),
+                                breakdown
+                            );
+                            let _ = router_hb.notify_all(&warning_msg).await;
+                            task.push_str(&format!(
+                                "\n**BUDGET WARNING**: {} inbound requests batched this tick.\n\
+                                 Sender breakdown: {}\n\
+                                 Investigate which deployed service is over-requesting. Use `channel_notify` \
+                                 to alert the operator and propose corrective action before proceeding.\n",
+                                pending_inbound.len(),
+                                breakdown
+                            ));
                         }
                     }
                     if due_refs.is_empty() && !unscoped_plugin_tasks.is_empty() {
@@ -1055,8 +1111,18 @@ pub async fn run_listen(
             let channel_registry = Arc::clone(&channel_registry);
             let route_registry = Arc::clone(&route_registry);
             let notification_queue = Arc::clone(&notification_queue);
+            let inbound_queue = Arc::clone(&inbound_queue);
 
             async move {
+                if msg.deferred {
+                    let mut q = inbound_queue.lock().await;
+                    if q.len() < 100 {
+                        q.push(msg);
+                    } else {
+                        warn!("inbound_queue full (100), dropping deferred message from {}", msg.sender_id);
+                    }
+                    return;
+                }
                 if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
                     let mut q = notification_queue.lock().await;
                     if q.len() < 500 {

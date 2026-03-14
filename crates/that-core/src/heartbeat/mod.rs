@@ -106,6 +106,8 @@ pub enum Status {
     Processing,
     Done,
     Skipped,
+    Blocked,
+    Failed,
     Unknown(String),
 }
 
@@ -117,6 +119,8 @@ impl std::fmt::Display for Status {
             Status::Processing => write!(f, "processing"),
             Status::Done => write!(f, "done"),
             Status::Skipped => write!(f, "skipped"),
+            Status::Blocked => write!(f, "blocked"),
+            Status::Failed => write!(f, "failed"),
             Status::Unknown(s) => write!(f, "{s}"),
         }
     }
@@ -130,6 +134,8 @@ impl From<&str> for Status {
             "processing" => Status::Processing,
             "done" => Status::Done,
             "skipped" => Status::Skipped,
+            "blocked" => Status::Blocked,
+            "failed" => Status::Failed,
             other => Status::Unknown(other.to_string()),
         }
     }
@@ -548,7 +554,7 @@ fn schedule_requires_human_approval(schedule: &Schedule) -> bool {
 
 fn cron_is_subhourly(expr: &str) -> bool {
     parse_cron_expression(expr)
-        .map(|parsed| parsed.minute.iter().filter(|slot| **slot).count() > 1)
+        .map(|parsed| parsed.minute.iter().filter(|slot| **slot).count() > 2)
         .unwrap_or(false)
 }
 
@@ -1229,6 +1235,20 @@ mod tests {
     #[test]
     fn subhourly_cron_requires_human_approval() {
         let entry = make_entry(Schedule::Cron("*/5 * * * *".into()), None, None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn every_30_min_cron_does_not_require_human_approval() {
+        // 2 slots per hour — within the 30-min threshold
+        let entry = make_entry(Schedule::Cron("0,30 * * * *".into()), None, None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn every_20_min_cron_requires_human_approval() {
+        // 3 slots per hour — exceeds the 30-min threshold
+        let entry = make_entry(Schedule::Cron("0,20,40 * * * *".into()), None, None);
         assert!(!is_entry_due(&entry, None));
     }
 

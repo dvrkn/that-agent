@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::discovery::{format_plugin_preamble, format_plugin_preamble_full};
 use crate::config::AgentDef;
+use crate::plans;
 use crate::session::SessionSummary;
 use crate::skills;
 use crate::tasks;
@@ -272,7 +273,7 @@ pub fn build_preamble(
          Call typed tools by name. Use `read_skill <name>` to load a skill reference before using it.\n\
          Heartbeat fields: `schedule` (`once|minutely|hourly|daily|weekly|cron: <expr>`), \
          `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp), \
-         `human_approved` (`true` required for `minutely` and sub-hourly cron after explicit human approval).\n\
+         `human_approved` (`true` required for `minutely` and schedules firing more than twice per hour after explicit human approval).\n\
          Your Agents.md defines tool habits and workflow preferences.\n\n",
     );
 
@@ -284,7 +285,11 @@ pub fn build_preamble(
          Follow them — they are your voice, not suggestions.\n\n\
          Your messages to humans are composed messages, not work logs. Never dump raw tool \
          output, file paths with line numbers, or verification checklists unless the human \
-         explicitly asked for that level of detail.\n\n",
+         explicitly asked for that level of detail.\n\n\
+         ### answer vs channel_notify\n\n\
+         - `answer` — deliver your **final answer** to the human. Must be the last tool you call. \
+         The message is sent with proper channel formatting.\n\
+         - `channel_notify` — send **mid-turn progress updates** only. Not for final answers.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────
@@ -429,6 +434,45 @@ pub fn build_preamble(
         ));
     }
 
+    // ── 9.5 Plans — compiled (active plan summaries) ──────────────────────────
+
+    let active_plans = plans::scan_plans_local(&agent.name);
+    if !active_plans.is_empty() {
+        preamble.push_str("## Active Plans\n\n");
+        for p in &active_plans {
+            let vars = if p.variables.is_empty() {
+                String::new()
+            } else {
+                let pairs: Vec<String> = p
+                    .variables
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                format!(" — Variables: {}", pairs.join(", "))
+            };
+            preamble.push_str(&format!(
+                "- **plan-{}.md**: {} ({}/{} steps){}\n",
+                p.number, p.title, p.steps_done, p.steps_total, vars,
+            ));
+        }
+        preamble.push('\n');
+    }
+
+    // Plan guidance (always present, near tasks section).
+    preamble.push_str(
+        "### Plan Files\n\n\
+         For multi-step work, create `plan-{n}.md` in your agent directory.\n\
+         Format: H1 title, `**Status**: active`, checklist steps (`- [ ]`/`- [x]`), \
+         optional `## Variables` section with `- key: value` pairs.\n\
+         Check off steps as you go, set status to `done` when finished.\n\
+         On restart, read active plans and resume from the first unchecked step.\n\
+         Use variables to persist extracted names, URLs, and values between turns.\n\
+         Keep plans under 50 lines; reference task files for complex sub-work.\n\
+         For fallback strategies: `**Fallback**: <alternative approach if primary fails>`.\n\n\
+         ### Task Dependencies\n\n\
+         Use `**Blocked-by**: <task ref>` in task files to express dependencies between tasks.\n\n",
+    );
+
     // ── 10. Skills — compiled (discovered from disk) ──────────────────────────
 
     let skills_path = if sandbox {
@@ -482,12 +526,13 @@ pub fn build_preamble(
          Your HTTP gateway exposes three message endpoints. Choosing the right one matters:\n\n\
          | Endpoint | Behavior | Use when |\n\
          |----------|----------|----------|\n\
-         | `POST /v1/inbound` | Fire-and-forget (returns 202). Triggers a background agent run. Response delivered via `callback_url` if provided, otherwise the agent uses `channel_notify`. | Plugins, services, and bridges that need the agent to act autonomously in the background. |\n\
+         | `POST /v1/inbound` | Queued for next heartbeat tick (returns 202). Batched with scheduled tasks. Response delivered via `callback_url` if provided, otherwise the agent uses `answer`. | Plugins, services, and bridges that need the agent to act autonomously in the background. |\n\
          | `POST /v1/chat` | Synchronous (blocks until done, returns full response). | One-shot queries where the caller needs the answer inline. |\n\
          | `POST /v1/notify` | Zero-cost queue (returns 202). No LLM turn — batched into the next heartbeat tick. | Status reports, progress updates, fire-and-forget notifications. |\n\n\
          **Key rule for plugins and deployed services:** When building a service that sends \
          work to the agent (e.g. a content scanner with approve/reject buttons), always use \
          `/v1/inbound` so the agent processes the request asynchronously in the background. \
+         Inbound messages are batched — they queue until the next heartbeat tick, not processed immediately. \
          Never use `/v1/chat` from a plugin — it blocks the caller until inference completes \
          and makes tool calls visible on the user's channel, which breaks the async UX.\n\n\
          **`/v1/inbound` request body:**\n\
@@ -496,7 +541,7 @@ pub fn build_preamble(
          \"callback_url\": \"<optional-url-for-response>\"}\n\
          ```\n\
          - If `callback_url` is provided, the agent POSTs `{\"text\": \"<response>\"}` back when done.\n\
-         - If omitted, the agent uses `channel_notify` to report results on the originating channel.\n\
+         - If omitted, the agent uses `answer` to deliver results on the originating channel.\n\
          - Messages from the same `sender_id` are serialized — they queue, not run in parallel. \
          Use distinct `sender_id` values if you need concurrent processing.\n\n\
          ### Sub-agent communication protocol\n\n\
@@ -509,14 +554,14 @@ pub fn build_preamble(
          ```\n\
          The notification is queued and surfaced at the parent's next heartbeat tick — \
          it does NOT interrupt an ongoing user conversation or consume API quota.\n\n\
-         **Async request (triggers parent LLM turn, response delivered to callback):**\n\
+         **Async request (queued for parent's next heartbeat tick, response delivered to callback):**\n\
          ```\n\
          POST $THAT_PARENT_GATEWAY_URL/v1/inbound\n\
          Authorization: Bearer $THAT_PARENT_GATEWAY_TOKEN\n\
          {\"message\": \"<task>\", \"sender_id\": \"<your-name>\", \
          \"callback_url\": \"http://<your-gateway>/v1/inbound\"}\n\
          ```\n\
-         The parent processes the request as a full agent run and POSTs \
+         The parent queues the request and processes it at the next heartbeat tick, then POSTs \
          `{\"text\": \"<response>\"}` back to your `callback_url`.\n\n\
          Use `/v1/notify` for progress updates. Use `/v1/inbound` + `callback_url` only \
          when you genuinely need the parent to reason and respond.\n\n",

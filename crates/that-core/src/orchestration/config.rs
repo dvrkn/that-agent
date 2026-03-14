@@ -3,8 +3,8 @@ use crate::config::AgentDef;
 /// Maximum number of automatic retries on transient network / server errors.
 pub const MAX_NETWORK_RETRIES: u32 = 5;
 
-/// Initial backoff delay in ms; doubles each attempt (1 s -> 2 -> 4 -> 8 -> 16 s).
-pub const RETRY_BASE_DELAY_MS: u64 = 1_000;
+/// Initial backoff delay in ms; doubles each attempt (0.5 s -> 1 -> 2 -> 4 -> 8 s).
+pub const RETRY_BASE_DELAY_MS: u64 = 500;
 /// Warn when cache hit rate drops below this threshold on sizable prompts.
 pub const CACHE_HIT_WARN_THRESHOLD: f64 = 0.70;
 /// Fallback text used when the model completes without any final assistant text.
@@ -97,6 +97,7 @@ pub fn should_use_channel_empty_response_fallback(
     // already succeeded and produced its own outbound message, or when the agent
     // deliberately sent its final answer via channel_notify as its last action.
     !has_successful_terminal_channel_output(tool_events)
+        && !last_tool_was_answer(tool_events)
         && !last_tool_was_channel_notify(tool_events)
 }
 
@@ -166,16 +167,27 @@ fn has_successful_terminal_channel_output(tool_events: &[that_channels::ToolLogE
 }
 
 /// Returns true when the last tool result in the event log is a successful
+/// `answer`. This signals the agent delivered its final answer via the
+/// dedicated answer tool, so no duplicate Done event is needed.
+pub fn last_tool_was_answer(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    last_tool_result_name(tool_events) == Some(("answer", false))
+}
+
+/// Returns true when the last tool result in the event log is a successful
 /// `channel_notify`. This signals the agent deliberately sent its final
 /// answer via the notification tool, so no fallback response is needed.
-fn last_tool_was_channel_notify(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+pub fn last_tool_was_channel_notify(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    last_tool_result_name(tool_events) == Some(("channel_notify", false))
+}
+
+fn last_tool_result_name(tool_events: &[that_channels::ToolLogEvent]) -> Option<(&str, bool)> {
     tool_events.iter().rev().find_map(|ev| {
         if let that_channels::ToolLogEvent::Result { name, is_error, .. } = ev {
             Some((name.as_str(), *is_error))
         } else {
             None
         }
-    }) == Some(("channel_notify", false))
+    })
 }
 
 /// Memory tools are safe to re-invoke (idempotent intent); the model should
@@ -208,8 +220,8 @@ pub fn should_retry_empty_channel_response(
     if !text.trim().is_empty() {
         return false;
     }
-    // If the agent deliberately sent its final answer via channel_notify, skip retry.
-    if last_tool_was_channel_notify(tool_events) {
+    // If the agent deliberately sent its final answer via answer or channel_notify, skip retry.
+    if last_tool_was_answer(tool_events) || last_tool_was_channel_notify(tool_events) {
         return false;
     }
     // Avoid re-running after side-effecting tool calls — but memory tools are
@@ -543,7 +555,10 @@ pub fn append_memory_bootstrap_reminder(task: &str, history_len: usize) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{should_retry_empty_channel_response, should_use_channel_empty_response_fallback};
+    use super::{
+        last_tool_was_answer, should_retry_empty_channel_response,
+        should_use_channel_empty_response_fallback,
+    };
     use that_channels::ToolLogEvent;
 
     #[test]
@@ -637,6 +652,63 @@ mod tests {
             "",
             false,
             &tool_events
+        ));
+    }
+
+    #[test]
+    fn last_tool_was_answer_detects_successful_answer() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"Here is your result."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(last_tool_was_answer(&tool_events));
+    }
+
+    #[test]
+    fn empty_response_after_answer_skips_fallback() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"Done."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn retry_skipped_when_last_tool_was_answer() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"All done."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(!should_retry_empty_channel_response(
+            "",
+            false,
+            &tool_events,
+            0
         ));
     }
 

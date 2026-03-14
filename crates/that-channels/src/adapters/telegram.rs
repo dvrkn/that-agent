@@ -1143,6 +1143,7 @@ impl Channel for TelegramAdapter {
                             session_hint: None,
                             attachments: vec![],
                             callback_url: None,
+                            deferred: false,
                             metadata: Some(serde_json::json!({
                                 "type": "callback_query",
                                 "callback_query_id": cb_id,
@@ -1362,6 +1363,7 @@ impl Channel for TelegramAdapter {
                     session_hint: None,
                     attachments,
                     callback_url: None,
+                    deferred: false,
                     metadata: None,
                 };
                 if tx.send(msg).is_err() {
