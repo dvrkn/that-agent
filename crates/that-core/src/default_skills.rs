@@ -78,6 +78,10 @@ const DEFAULT_SKILLS: &[DefaultSkill] = &[
         name: "agent-orchestrator",
         content: include_str!("../skills/agent-orchestrator/SKILL.md"),
     },
+    DefaultSkill {
+        name: "git-workspace",
+        content: include_str!("../skills/git-workspace/SKILL.md"),
+    },
 ];
 
 /// Install all bundled default skills into the agent's skills directory.
