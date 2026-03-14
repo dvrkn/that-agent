@@ -93,3 +93,9 @@ When multiple workers are active simultaneously:
 | `workspace_diff(branch, repo?)` | Unified diff of branch vs main | Review before collecting |
 | `workspace_conflicts(branch, repo?)` | Conflict file list + both diffs | After a failed merge |
 | `workspace_collect(path, worker, strategy?)` | Merge or review worker's branch | When worker is done |
+
+## Local (Non-Kubernetes) Worktrees
+
+For agents sharing the same filesystem (Docker sandbox, local host), use the `worktree_*`
+tools instead of the `workspace_*` tools. Load `read_skill git-workspace worktree-local`
+for the full local worktree reference.

@@ -565,7 +565,7 @@ pub fn build_preamble(
          - `worktree_diff` / `worktree_log` — review an agent's changes\n\
          - `worktree_merge` — merge an agent's completed work\n\
          - `worktree_discard` — clean up a worktree after merging\n\n\
-         Use the `agent-worktree` skill for the full orchestration guide.\n\n\
+         Load `read_skill git-workspace worktree-local` for the full orchestration guide.\n\n\
          For remote agent communication, use `shell_exec` with \
          `that run query --remote <url> --token <token> \"<task>\"` to send tasks \
          to agents running HTTP gateway channels.\n\n\
