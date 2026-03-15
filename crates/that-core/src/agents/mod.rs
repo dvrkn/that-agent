@@ -591,16 +591,20 @@ pub async fn run_ephemeral_agent_k8s(
 
     kubectl_apply_json(&resources).await?;
 
-    // Watch Job until completion or timeout
+    // Watch Job until completion or timeout.
+    // Every 30s, tail the child's logs so the parent sees progress.
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
     let job_name = sa_name.clone();
+    let mut last_log_check = std::time::Instant::now() - Duration::from_secs(30);
+    let mut last_log_line = String::new();
 
     loop {
         if start.elapsed() > timeout {
-            // Clean up the timed-out job
+            // Grab final logs before cleanup for the error message
+            let final_logs = tail_job_logs(&job_name, &ns, 20).await;
             let _ = kubectl_delete_by_label(name, &ns).await;
-            anyhow::bail!("agent_run timed out after {timeout_secs}s");
+            anyhow::bail!("agent_run timed out after {timeout_secs}s. Last output:\n{final_logs}");
         }
 
         let output = tokio::process::Command::new("kubectl")
@@ -621,8 +625,8 @@ pub async fn run_ephemeral_agent_k8s(
             break;
         }
         if status_str.starts_with("Failed") {
-            let msg = status_str.strip_prefix("Failed ").unwrap_or("job failed");
-            anyhow::bail!("agent job failed: {msg}");
+            let logs = tail_job_logs(&job_name, &ns, 30).await;
+            anyhow::bail!("agent job failed: {status_str}\nLast output:\n{logs}");
         }
 
         // Check active count as fallback
@@ -650,20 +654,30 @@ pub async fn run_ephemeral_agent_k8s(
             .map(|s| *s != "0" && !s.is_empty())
             .unwrap_or(false)
         {
-            anyhow::bail!("agent job failed");
+            let logs = tail_job_logs(&job_name, &ns, 30).await;
+            anyhow::bail!("agent job failed\nLast output:\n{logs}");
+        }
+
+        // Periodic progress: tail last log line every 30s
+        if last_log_check.elapsed() >= Duration::from_secs(30) {
+            last_log_check = std::time::Instant::now();
+            let latest = tail_job_logs(&job_name, &ns, 1).await;
+            if !latest.is_empty() && latest != last_log_line {
+                last_log_line = latest.clone();
+                let elapsed = start.elapsed().as_secs();
+                tracing::info!(
+                    agent = %name,
+                    elapsed_secs = elapsed,
+                    "agent_run progress: {latest}"
+                );
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     // Collect logs
-    let logs_output = tokio::process::Command::new("kubectl")
-        .args(["logs", &format!("job/{job_name}"), "-n", &ns, "--tail=200"])
-        .output()
-        .await?;
-    let output_text = String::from_utf8_lossy(&logs_output.stdout)
-        .trim()
-        .to_string();
+    let output_text = tail_job_logs(&job_name, &ns, 200).await;
 
     let elapsed = start.elapsed().as_secs();
 
@@ -1330,6 +1344,22 @@ async fn kubectl_apply_json(resource: &serde_json::Value) -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
+}
+
+/// Tail the last N log lines from a K8s Job pod.
+async fn tail_job_logs(job_name: &str, ns: &str, tail: u32) -> String {
+    tokio::process::Command::new("kubectl")
+        .args([
+            "logs",
+            &format!("job/{job_name}"),
+            "-n",
+            ns,
+            &format!("--tail={tail}"),
+        ])
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Delete all resources for a named child agent by label selector.
