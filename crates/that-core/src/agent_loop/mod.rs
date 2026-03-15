@@ -1181,7 +1181,6 @@ fn is_parallel_safe(name: &str) -> bool {
             | "agent_list"
             | "list_skills"
             | "read_skill"
-            | "mem_recall"
     )
 }
 
