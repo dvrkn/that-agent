@@ -83,6 +83,10 @@ async fn main() {
             "/api/repos/{repo}/conflicts/{*branch}",
             axum::routing::get(api::branch_conflicts),
         )
+        .route(
+            "/api/repos/{repo}/webhook",
+            axum::routing::post(api::register_webhook),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body))
         .with_state(state);
 

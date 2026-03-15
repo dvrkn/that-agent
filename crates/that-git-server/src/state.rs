@@ -3,12 +3,14 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 pub struct AppState {
     pub repo_root: PathBuf,
-    pub webhook_url: Option<String>,
+    pub default_webhook_url: Option<String>,
     pub expiry_hours: u64,
     pub auto_merge: bool,
     /// repo_name -> (branch -> last_push_time). Seeded from filesystem mtime on startup,
     /// updated in-memory on each push. Expiry uses fs mtime as fallback after restart.
     pub last_push: Mutex<HashMap<String, HashMap<String, DateTime<Utc>>>>,
+    /// Per-repo webhook URLs. Agents register their gateway URL when sharing a workspace.
+    pub repo_webhooks: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -20,10 +22,11 @@ impl AppState {
     ) -> Self {
         Self {
             repo_root,
-            webhook_url,
+            default_webhook_url: webhook_url.filter(|u| !u.trim().is_empty()),
             expiry_hours,
             auto_merge,
             last_push: Mutex::new(HashMap::new()),
+            repo_webhooks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,6 +68,23 @@ impl AppState {
                 .await;
         }
         Ok(path)
+    }
+
+    /// Resolve the webhook URL for a repo: per-repo override, then global default.
+    pub fn webhook_url_for(&self, repo: &str) -> Option<String> {
+        if let Ok(map) = self.repo_webhooks.lock() {
+            if let Some(url) = map.get(repo) {
+                return Some(url.clone());
+            }
+        }
+        self.default_webhook_url.clone()
+    }
+
+    /// Register a webhook URL for a specific repo.
+    pub fn register_webhook(&self, repo: &str, url: &str) {
+        if let Ok(mut map) = self.repo_webhooks.lock() {
+            map.insert(repo.to_string(), url.to_string());
+        }
     }
 
     /// Record a push timestamp for a repo/branch.

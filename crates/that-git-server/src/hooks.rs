@@ -6,29 +6,40 @@ use crate::{acl::RefCommand, state::AppState};
 /// Fire-and-forget post-receive hooks: webhook notification + optional auto-merge.
 pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: Vec<RefCommand>) {
     tokio::spawn(async move {
+        let agent_str = agent.as_deref().unwrap_or("orchestrator");
         for r in &refs {
             let branch = r.refname.strip_prefix("refs/heads/").unwrap_or(&r.refname);
 
-            // Webhook notification
-            if let Some(url) = &state.webhook_url {
+            info!(
+                repo = %repo,
+                branch = %branch,
+                agent = %agent_str,
+                commit = %r.new,
+                "push received"
+            );
+
+            // Webhook notification (per-repo URL, then global fallback)
+            if let Some(url) = state.webhook_url_for(&repo) {
                 let payload = serde_json::json!({
                     "event": "push",
                     "repo": repo,
                     "branch": branch,
-                    "agent": agent.as_deref().unwrap_or("orchestrator"),
+                    "agent": agent_str,
                     "old_commit": r.old,
                     "commit": r.new,
                 });
                 let client = reqwest::Client::new();
                 match client
-                    .post(url)
+                    .post(&url)
                     .json(&payload)
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await
                 {
-                    Ok(resp) => info!("webhook -> {} {}", url, resp.status()),
-                    Err(e) => warn!("webhook failed: {e}"),
+                    Ok(resp) => {
+                        info!(repo = %repo, url = %url, status = %resp.status(), "webhook delivered")
+                    }
+                    Err(e) => warn!(repo = %repo, url = %url, "webhook failed: {e}"),
                 }
             }
 
@@ -138,7 +149,7 @@ async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
                 Ok(o) if o.status.success() => {
                     info!("auto-merged {branch} into main in {repo} ({commit_oid})");
                     // Notify success via webhook
-                    if let Some(url) = &state.webhook_url {
+                    if let Some(url) = state.webhook_url_for(repo) {
                         let payload = serde_json::json!({
                             "event": "auto_merge",
                             "repo": repo,
@@ -165,7 +176,7 @@ async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
             let conflicting_files: Vec<&str> =
                 stdout.lines().skip(1).filter(|l| !l.is_empty()).collect();
             info!("auto-merge skipped (conflict) for {branch} in {repo}: {conflicting_files:?}");
-            if let Some(url) = &state.webhook_url {
+            if let Some(url) = state.webhook_url_for(repo) {
                 let payload = serde_json::json!({
                     "event": "merge_conflict",
                     "repo": repo,

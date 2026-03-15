@@ -894,9 +894,20 @@ pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serd
         "git push to git-server failed: {push_stderr}"
     );
 
+    // Register webhook so the git server notifies us on worker pushes
+    let parent_gw = crate::orchestration::support::resolve_gateway_url();
+    let notify_url = format!("{parent_gw}/v1/notify");
+    let _ = reqwest::Client::new()
+        .post(format!("{git_svc}/api/repos/{name}/webhook"))
+        .json(&serde_json::json!({ "url": notify_url }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
     Ok(serde_json::json!({
         "name": name,
         "clone_url": repo_url,
+        "webhook": notify_url,
     }))
 }
 

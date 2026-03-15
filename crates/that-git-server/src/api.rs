@@ -258,6 +258,26 @@ pub async fn branch_conflicts(
     }))
 }
 
+/// POST /api/repos/{repo}/webhook — register a webhook URL for push notifications
+pub async fn register_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let url = body["url"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "missing 'url' field".into()))?;
+    if url.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "url must not be empty".into()));
+    }
+    let repo_name = repo.trim_end_matches(".git");
+    state.register_webhook(repo_name, url);
+    tracing::info!(repo = %repo_name, url = %url, "webhook registered");
+    Ok(Json(
+        serde_json::json!({ "repo": repo_name, "webhook_url": url, "registered": true }),
+    ))
+}
+
 async fn ahead_behind(repo_path: &std::path::Path, branch: &str) -> (u32, u32) {
     let out = Command::new("git")
         .arg("-C")

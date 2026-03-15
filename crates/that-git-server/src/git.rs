@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 use tokio::process::Command;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{acl, hooks, state::AppState};
 
@@ -26,6 +26,7 @@ pub async fn info_refs(
         return Err((StatusCode::BAD_REQUEST, "invalid service".into()));
     }
 
+    info!(repo = %repo, service = %svc, "info/refs");
     let repo_path = state
         .ensure_repo(&repo)
         .await
@@ -66,6 +67,7 @@ pub async fn upload_pack(
     Path(repo): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, (StatusCode, String)> {
+    info!(repo = %repo, bytes = body.len(), "upload-pack (fetch/clone)");
     let repo_path = state
         .ensure_repo(&repo)
         .await
@@ -84,6 +86,8 @@ pub async fn receive_pack(
         .get("X-Agent-Name")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+
+    info!(repo = %repo, agent = ?agent, bytes = body.len(), "receive-pack (push)");
 
     // ACL: parse ref commands from the request body, enforce branch policy
     let refs = acl::parse_ref_commands(&body);
