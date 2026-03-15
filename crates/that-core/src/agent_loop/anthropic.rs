@@ -44,7 +44,7 @@ pub(super) async fn stream_turn(
 
     let is_oauth = is_oauth_token(api_key);
 
-    let client = reqwest::Client::new();
+    let client = super::llm_http_client();
     let mut req = client
         .post("https://api.anthropic.com/v1/messages")
         .header("anthropic-version", "2023-06-01")

@@ -34,7 +34,7 @@ pub(super) async fn stream_turn(
 
     let body = build_request(system, messages, tools, model, max_tokens, prompt_caching);
 
-    let client = reqwest::Client::new();
+    let client = super::llm_http_client();
     let response = client
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))

@@ -42,6 +42,15 @@ use crate::tools::typed::dispatch as dispatch_tool;
 /// Models with extended thinking may pause before the first token, so this is generous.
 pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
 
+/// Build an HTTP client with connect and read timeouts to prevent hanging after network errors.
+pub(super) fn llm_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300)) // 5min overall per request
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Max chars kept for tool args / result previews recorded on spans.
 const TRACE_PREVIEW_CHARS: usize = 400;
 /// Max chars kept for richer LLM input/output payload previews.
