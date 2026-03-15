@@ -283,6 +283,12 @@ pub async fn spawn_persistent_agent_k8s(
         "THAT_PARENT_GATEWAY_URL": parent_gw,
         "THAT_PARENT_GATEWAY_TOKEN": gw_token,
         "THAT_SANDBOX_K8S_NAMESPACE": ns,
+        // Blank out channel tokens so children don't steal the parent's channels.
+        // Children communicate via their HTTP gateway only.
+        "TELEGRAM_BOT_TOKEN": "",
+        "DISCORD_BOT_TOKEN": "",
+        "SLACK_BOT_TOKEN": "",
+        "SLACK_APP_TOKEN": "",
     });
     if let Ok(auth) = std::env::var("CLAUDE_CODE_AUTH") {
         config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(auth);
