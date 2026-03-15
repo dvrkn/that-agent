@@ -832,10 +832,12 @@ pub async fn unregister_agent_k8s(name: &str) -> Result<serde_json::Value> {
 }
 
 /// Stop a child agent — delete its Job/Deployment and all associated resources.
+/// Equivalent to unregister but returns "stopped" status for semantic clarity.
 pub async fn agent_stop_k8s(name: &str) -> Result<serde_json::Value> {
-    let ns = k8s_namespace();
-    kubectl_delete_by_label(name, &ns).await?;
-    Ok(serde_json::json!({ "name": name, "status": "stopped" }))
+    unregister_agent_k8s(name).await.map(|mut v| {
+        v["status"] = serde_json::json!("stopped");
+        v
+    })
 }
 
 /// Get detailed status of a child agent — Job/Deployment state, pod phase, start time.

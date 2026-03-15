@@ -7,6 +7,7 @@ use crate::{acl::RefCommand, state::AppState};
 pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: Vec<RefCommand>) {
     tokio::spawn(async move {
         let agent_str = agent.as_deref().unwrap_or("orchestrator");
+        let client = reqwest::Client::new(); // one client per push, reused for all refs + auto-merge
         for r in &refs {
             let branch = r.refname.strip_prefix("refs/heads/").unwrap_or(&r.refname);
 
@@ -29,7 +30,6 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
                     "branch": branch,
                     "commit": r.new,
                 });
-                let client = reqwest::Client::new();
                 match client
                     .post(&url)
                     .json(&payload)
@@ -46,7 +46,7 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
 
             // Auto-merge: if enabled and this is a task branch, try merge into main
             if state.auto_merge && branch.starts_with("task/") {
-                auto_merge(&state, &repo, branch).await;
+                auto_merge(&state, &client, &repo, branch).await;
             }
         }
     });
@@ -56,7 +56,7 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
 ///
 /// Uses `git merge-tree --write-tree` to compute the merged tree OID without a working tree,
 /// then `git commit-tree` + `git update-ref` to create the merge commit and advance main.
-async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
+async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, branch: &str) {
     let repo_path = match state.repo_path(repo) {
         Some(p) if p.exists() => p,
         _ => return,
@@ -188,7 +188,7 @@ async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
                     "branch": branch,
                     "conflicting_files": conflicting_files,
                 });
-                let _ = reqwest::Client::new()
+                let _ = client
                     .post(url)
                     .json(&payload)
                     .timeout(std::time::Duration::from_secs(5))

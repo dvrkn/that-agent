@@ -39,16 +39,23 @@ use crate::tools::typed::dispatch as dispatch_tool;
 
 /// Max seconds to wait for the next SSE/WS chunk before treating the stream as stalled.
 /// Applies to all providers (Anthropic, OpenRouter, OpenAI HTTP).
-/// Models with extended thinking may pause before the first token, so this is generous.
+/// 90s is generous but needed — extended thinking on large contexts can pause before
+/// the first delta. Anthropic sends keepalive comments during thinking, but transient
+/// API issues may produce genuine 90s silences that trigger retries.
 pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
 
-/// Build an HTTP client with connect and read timeouts to prevent hanging after network errors.
-pub(super) fn llm_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(300)) // 5min overall per request
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+/// Shared HTTP client with connect and read timeouts. Reuses connection pool across all LLM calls.
+pub(super) fn llm_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(300))
+            .pool_max_idle_per_host(4)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// Max chars kept for tool args / result previews recorded on spans.
@@ -404,6 +411,19 @@ async fn run_from_checkpoint(
 
         // Run parallel-safe tools concurrently.
         if parallel_indices.len() > 1 {
+            // Pre-log all parallel tool calls (audit + tracing) before dispatching.
+            for &i in &parallel_indices {
+                let tc = &tool_calls[i];
+                let logged_args = compact_oneliner(&tc.args_json, TOOL_LOG_PREVIEW_CHARS);
+                info!(tool = %tc.name, call_id = %tc.call_id, " → {}: {logged_args}", tc.name);
+                if let Some(ref sd) = config.tool_ctx.state_dir {
+                    crate::audit::log_event(
+                        sd,
+                        "tool_call",
+                        &format!("{}: {}", tc.name, tc.args_json),
+                    );
+                }
+            }
             let parallel_futures: Vec<_> = parallel_indices
                 .iter()
                 .map(|&i| {
@@ -411,22 +431,8 @@ async fn run_from_checkpoint(
                     let tool_ctx = config.tool_ctx.clone();
                     let name = tc.name.clone();
                     let args = tc.args_json.clone();
-                    let call_id = tc.call_id.clone();
                     async move {
-                        let logged_args = compact_oneliner(&args, TOOL_LOG_PREVIEW_CHARS);
-                        info!(tool = %name, call_id = %call_id, " → {name}: {logged_args}");
                         let dr = dispatch_tool(&name, &args, &tool_ctx).await;
-                        let result_chars = dr.text.chars().count();
-                        let is_error = is_tool_error_result(&dr.text);
-                        let status_str = if is_error {
-                            format!("ERR  {}", compact_oneliner(&dr.text, 60))
-                        } else {
-                            "ok".to_string()
-                        };
-                        info!(
-                            tool = %name, call_id = %call_id, is_error, result_chars,
-                            " ← {name}: {status_str}  ({result_chars} chars)"
-                        );
                         (i, dr.text, dr.images)
                     }
                 })

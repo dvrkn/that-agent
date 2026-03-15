@@ -96,43 +96,40 @@ pub async fn repo_activity(
         return Err((StatusCode::NOT_FOUND, "repo not found".into()));
     }
 
-    let branch_out = Command::new("git")
+    // Single git command to get all branch metadata (replaces N+1 calls).
+    let ref_out = Command::new("git")
         .arg("-C")
         .arg(&path)
-        .args(["branch", "--format=%(refname:short)"])
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)\t%(objectname:short) %(creatordate:iso-strict) %(subject)",
+            "refs/heads/",
+        ])
         .output()
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("git branch: {e}"),
+                format!("git for-each-ref: {e}"),
             )
         })?;
 
-    let branch_list = String::from_utf8_lossy(&branch_out.stdout);
+    let ref_list = String::from_utf8_lossy(&ref_out.stdout);
     let mut branches = Vec::new();
 
-    for name in branch_list.lines().filter(|l| !l.is_empty()) {
+    for line in ref_list.lines().filter(|l| !l.is_empty()) {
+        let (name, last_commit) = line.split_once('\t').unwrap_or((line, ""));
         let (ahead, behind) = if name != "main" {
             ahead_behind(&path, name).await
         } else {
             (0, 0)
         };
 
-        let last_commit = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["log", "-1", "--format=%H %ci %s", name])
-            .output()
-            .await
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
         branches.push(BranchInfo {
             name: name.to_string(),
             ahead,
             behind,
-            last_commit,
+            last_commit: last_commit.to_string(),
         });
     }
 
