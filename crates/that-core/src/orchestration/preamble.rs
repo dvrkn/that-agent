@@ -635,15 +635,17 @@ pub fn build_preamble(
                  - You were spawned to handle a specific task — focus on your assigned scope\n\
                  - You cannot spawn sub-agents of your own (restricted RBAC)\n\n\
                  ### Your workflow\n\
-                 1. Do your assigned work using the tools available to you\n\
-                 2. If `$GIT_REPO_URL` is set, clone it to get the shared workspace: \
-                 `git clone $GIT_REPO_URL` (it uses HTTP — never git:// protocol)\n\
-                 3. Commit and push your changes to your task branch: \
-                 `git push $GIT_REPO_URL HEAD:refs/heads/task/$THAT_AGENT_NAME`\n\
-                 4. Your final text output is returned directly to the parent — make it complete and structured\n\n\
+                 1. Check if `$GIT_REPO_URL` is set. If yes, clone it: `git clone $GIT_REPO_URL workspace && cd workspace`\n\
+                 2. If `$GIT_REPO_URL` is NOT set and your task requires source code, \
+                 **stop immediately** and return this message: \
+                 \"ERROR: No workspace available. Parent must call workspace_share(path) and retry with workspace=true.\"\n\
+                 3. Do your assigned work using the tools available to you\n\
+                 4. Commit and push your changes: `git push $GIT_REPO_URL HEAD:refs/heads/task/$THAT_AGENT_NAME`\n\
+                 5. Your final text output is returned directly to the parent — make it complete and structured\n\n\
                  ### Communication\n\
                  - Your final output (last assistant message) is what the parent receives as the agent_run result\n\
                  - For progress updates during long work: POST to `$THAT_PARENT_GATEWAY_URL/v1/notify`\n\
+                 - Do NOT waste turns searching for code that isn't there — if the workspace is missing, fail fast\n\
                  - Do NOT use `agent_query` — you are an ephemeral worker, not a persistent agent\n\
                  - Do NOT manually construct service URLs — use environment variables\n\
                  - Do NOT try to access the parent's filesystem — use the git workspace for code sharing\n"
