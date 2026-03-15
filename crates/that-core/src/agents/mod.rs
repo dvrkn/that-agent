@@ -361,8 +361,8 @@ pub async fn spawn_persistent_agent_k8s(
                                 "image": image,
                                 "command": ["that", "--agent", name, "run", "listen", "--no-sandbox"],
                                 "envFrom": [
-                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
                                     { "secretRef": { "name": "that-agent-secrets", "optional": true } },
+                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
                                 ],
                                 "ports": [{ "containerPort": 8080, "name": "gateway" }],
                                 "readinessProbe": {
@@ -582,8 +582,8 @@ pub async fn run_ephemeral_agent_k8s(
                                 "command": ["/bin/bash", "-c",
                                     "exec that --agent \"$THAT_AGENT_NAME\" run query --parent \"$THAT_AGENT_PARENT\" --no-sandbox --task-file /etc/agent-task/task.txt"],
                                 "envFrom": [
-                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
                                     { "secretRef": { "name": "that-agent-secrets", "optional": true } },
+                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
                                 ],
                                 "resources": {
                                     "requests": { "cpu": "200m", "memory": "256Mi" },
