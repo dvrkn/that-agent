@@ -269,144 +269,136 @@ pub async fn spawn_persistent_agent_k8s(
     let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
 
     let role_str = role.unwrap_or("");
-    let labels = agent_labels(name, parent, "persistent", role_str);
-    let owner_ref = owner_reference(&parent_deploy, &deploy_uid);
+    let labels = k8s_labels(name, parent, "persistent", role_str);
+    let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
 
-    // Forward auth credentials so children share the parent's rate limits.
-    let extra_env = std::env::var("CLAUDE_CODE_AUTH")
-        .ok()
-        .map(|v| format!("  CLAUDE_CODE_AUTH: \"{v}\"\n"))
-        .unwrap_or_default();
+    let mut config_data = serde_json::json!({
+        "THAT_AGENT_NAME": name,
+        "THAT_AGENT_PARENT": parent,
+        "THAT_AGENT_ROLE": role_str,
+        "THAT_SANDBOX_MODE": "kubernetes",
+        "THAT_TRUSTED_LOCAL_SANDBOX": "1",
+        "THAT_AGENT_PROVIDER": provider,
+        "THAT_AGENT_MODEL": model_str,
+        "THAT_PARENT_GATEWAY_URL": parent_gw,
+        "THAT_PARENT_GATEWAY_TOKEN": gw_token,
+        "THAT_SANDBOX_K8S_NAMESPACE": ns,
+    });
+    if let Ok(auth) = std::env::var("CLAUDE_CODE_AUTH") {
+        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(auth);
+    }
 
-    let yaml = format!(
-        r#"---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: that-agent-child-readonly
-subjects:
-  - kind: ServiceAccount
-    name: {sa_name}
-    namespace: {ns}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {sa_name}-config
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-data:
-  THAT_AGENT_NAME: "{name}"
-  THAT_AGENT_PARENT: "{parent}"
-  THAT_AGENT_ROLE: "{role_str}"
-  THAT_SANDBOX_MODE: "kubernetes"
-  THAT_TRUSTED_LOCAL_SANDBOX: "1"
-  THAT_AGENT_PROVIDER: "{provider}"
-  THAT_AGENT_MODEL: "{model_str}"
-  THAT_PARENT_GATEWAY_URL: "{parent_gw}"
-  THAT_PARENT_GATEWAY_TOKEN: "{gw_token}"
-  THAT_SANDBOX_K8S_NAMESPACE: "{ns}"
-{extra_env}---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      that-agent/name: "{name}"
-  template:
-    metadata:
-      labels:
-{labels}
-    spec:
-      serviceAccountName: {sa_name}
-      automountServiceAccountToken: true
-      containers:
-        - name: agent
-          image: {image}
-          command: ["that", "--agent", "{name}", "run", "listen", "--no-sandbox"]
-          envFrom:
-            - configMapRef:
-                name: {sa_name}-config
-            - secretRef:
-                name: that-agent-secrets
-                optional: true
-          ports:
-            - containerPort: 8080
-              name: gateway
-          readinessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "test -f /tmp/that-agent-ready"]
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  test -f /tmp/that-agent-alive && \
-                  [ $(( $(date +%s) - $(stat -c %Y /tmp/that-agent-alive) )) -lt 30 ]
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "{cpu_limit}"
-              memory: "{mem_limit}"
-          volumeMounts:
-            - name: agent-home
-              mountPath: /home/agent/.that-agent
-      volumes:
-        - name: agent-home
-          emptyDir: {{}}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-spec:
-  selector:
-    that-agent/name: "{name}"
-  ports:
-    - name: gateway
-      port: 8080
-      targetPort: 8080
-"#
-    );
+    let resources = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                }
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "that-agent-child-readonly"
+                },
+                "subjects": [{
+                    "kind": "ServiceAccount",
+                    "name": sa_name,
+                    "namespace": ns,
+                }]
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": format!("{sa_name}-config"),
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "data": config_data,
+            },
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "spec": {
+                    "replicas": 1,
+                    "selector": { "matchLabels": { "that-agent/name": sanitize_label_value(name) } },
+                    "template": {
+                        "metadata": { "labels": labels },
+                        "spec": {
+                            "serviceAccountName": sa_name,
+                            "automountServiceAccountToken": true,
+                            "containers": [{
+                                "name": "agent",
+                                "image": image,
+                                "command": ["that", "--agent", name, "run", "listen", "--no-sandbox"],
+                                "envFrom": [
+                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
+                                    { "secretRef": { "name": "that-agent-secrets", "optional": true } },
+                                ],
+                                "ports": [{ "containerPort": 8080, "name": "gateway" }],
+                                "readinessProbe": {
+                                    "exec": { "command": ["/bin/sh", "-c", "test -f /tmp/that-agent-ready"] },
+                                    "initialDelaySeconds": 5,
+                                    "periodSeconds": 5,
+                                },
+                                "livenessProbe": {
+                                    "exec": { "command": ["/bin/sh", "-c",
+                                        "test -f /tmp/that-agent-alive && [ $(( $(date +%s) - $(stat -c %Y /tmp/that-agent-alive) )) -lt 30 ]"] },
+                                    "initialDelaySeconds": 30,
+                                    "periodSeconds": 10,
+                                },
+                                "resources": {
+                                    "requests": { "cpu": "200m", "memory": "256Mi" },
+                                    "limits": { "cpu": cpu_limit, "memory": mem_limit },
+                                },
+                                "volumeMounts": [{ "name": "agent-home", "mountPath": "/home/agent/.that-agent" }],
+                            }],
+                            "volumes": [{ "name": "agent-home", "emptyDir": {} }],
+                        }
+                    }
+                }
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "spec": {
+                    "selector": { "that-agent/name": sanitize_label_value(name) },
+                    "ports": [{ "name": "gateway", "port": 8080, "targetPort": 8080 }],
+                }
+            }
+        ]
+    });
 
-    kubectl_apply(&yaml).await?;
+    kubectl_apply_json(&resources).await?;
 
     let gateway_url = format!("http://{sa_name}.{ns}.svc.cluster.local:8080");
     Ok(serde_json::json!({
@@ -1318,54 +1310,6 @@ fn k8s_owner_refs(deploy_name: &str, uid: &str) -> serde_json::Value {
 }
 
 // Keep YAML helpers for persistent agent (will migrate later)
-fn agent_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> String {
-    format!(
-        "    that-agent/managed: \"true\"\n\
-         \x20   that-agent/name: \"{name}\"\n\
-         \x20   that-agent/parent: \"{parent}\"\n\
-         \x20   that-agent/type: \"{agent_type}\"\n\
-         \x20   that-agent/role: \"{role}\""
-    )
-}
-
-fn owner_reference(deploy_name: &str, uid: &str) -> String {
-    if uid.is_empty() {
-        return String::new();
-    }
-    format!(
-        "  ownerReferences:\n\
-         \x20   - apiVersion: apps/v1\n\
-         \x20     kind: Deployment\n\
-         \x20     name: {deploy_name}\n\
-         \x20     uid: {uid}\n\
-         \x20     controller: true\n\
-         \x20     blockOwnerDeletion: false"
-    )
-}
-
-/// Apply a multi-document YAML via `kubectl apply -f -`.
-async fn kubectl_apply(yaml: &str) -> Result<()> {
-    let mut child = tokio::process::Command::new("kubectl")
-        .args(["apply", "-f", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(yaml.as_bytes()).await?;
-    }
-
-    let output = child.wait_with_output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "kubectl apply failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
 /// Apply a JSON K8s resource list via `kubectl apply -f -`.
 async fn kubectl_apply_json(resource: &serde_json::Value) -> Result<()> {
     let json_str = serde_json::to_string(resource)?;
