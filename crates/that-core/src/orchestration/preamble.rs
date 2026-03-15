@@ -522,46 +522,42 @@ pub fn build_preamble(
         preamble.push_str(
             "## Orchestration — Multi-Agent (Kubernetes)\n\n\
              You can delegate work to child agents running as separate pods in your namespace.\n\n\
-             ### Two patterns for delegation\n\n\
-             **Persistent agents** — long-running services you can query repeatedly:\n\
+             ### Delegation tools\n\n\
+             **Ephemeral agents** (`agent_run`) — one-off tasks that run and return results:\n\
+             - `agent_run(name, task, role?)` → blocks until done, returns the agent's full output\n\
+             - Call multiple `agent_run` in one turn — they run **in parallel** automatically\n\
+             - Use for: analysis, research, coding tasks, batch processing, reviews\n\n\
+             **Persistent agents** (`spawn_agent`) — long-running services:\n\
              - `spawn_agent(name, role)` → creates a Deployment + Service\n\
              - `agent_query(name, message)` → synchronous request/response via gateway\n\
              - `agent_unregister(name)` → tear down when no longer needed\n\
              - Use for: coordinators, channel listeners, always-on workers\n\n\
-             **Ephemeral agents** — one-off tasks that run and return results:\n\
-             - `agent_run(name, task, role?)` → blocks until done, returns result\n\
-             - Call multiple `agent_run` in parallel for fan-out work\n\
-             - Workers see their progress notifications on your channel\n\
-             - Use for: analysis tasks, batch processing, parallel research\n\n\
-             ### When to delegate\n\
-             - When the user asks you to delegate or use workers: ALWAYS use agent_run\n\
-             - When you need parallel work on independent subtasks: fan out with agent_run\n\
-             - When you need a long-running service or collaborator: spawn_agent\n\
-             - Only do work yourself if it's a single quick lookup or the user explicitly says so\n\
+             ### Orchestration workflow\n\n\
+             **Step 1 — Prepare.** Analyze the task, identify independent work units. \
+             For coding tasks: `workspace_share(path)` FIRST.\n\
+             **Step 2 — Dispatch.** Call multiple `agent_run` in a single turn for parallel execution. \
+             Give each agent a clear, self-contained task with all context it needs.\n\
+             **Step 3 — Collect.** When all `agent_run` calls return, you receive every agent's output. \
+             Read each result carefully.\n\
+             **Step 4 — Deliver.** Synthesize findings into a complete, structured answer for the human. \
+             Never send empty or placeholder messages. If an agent failed, explain what happened.\n\
+             **Step 5 — Merge (coding).** Use `workspace_activity()` to see which workers pushed, \
+             then `workspace_collect(path, worker)` to merge each one sequentially.\n\n\
+             ### Rules\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool\n\
-             - For coding tasks: ALWAYS call `workspace_share(path)` BEFORE `agent_run` with `workspace=true`\n\n\
-             ### Delivering results\n\
-             - When `agent_run` returns, you MUST read the result, extract the key findings, and \
-             deliver a complete, well-structured answer to the human via `channel_notify`\n\
-             - Never send an empty or placeholder message — if the agent produced output, the human expects substance\n\
-             - If the result is large, organize it into clear sections but preserve all important details\n\
-             - If the agent failed or returned an error, explain what went wrong and what you will do next\n\
-             - Ephemeral workers also POST progress to your gateway — these appear on the channel automatically\n\
-             - Persistent agents can be queried for status at any time\n\n\
-             ### Coding tasks — sharing code with workers\n\
-             **IMPORTANT: You MUST call `workspace_share(path)` BEFORE spawning any worker with `workspace=true`. \
-             Workers clone at startup — if the workspace is not shared yet, they will fail.**\n\
-             - `workspace_share(path)` → pushes a git repo to the in-cluster git server (call FIRST)\n\
-             - `agent_run(name, task, workspace=true)` → worker clones the shared repo (call AFTER share)\n\
-             - `workspace_activity()` → check which workers have pushed, how far ahead/behind\n\
-             - `workspace_diff(branch)` → review a worker's changes without cloning\n\
-             - `workspace_collect(path, worker)` → merge worker's changes back\n\
-             - `workspace_conflicts(branch)` → on merge failure, see conflicting files and both diffs\n\
+             - For coding tasks: ALWAYS call `workspace_share(path)` BEFORE `agent_run` with `workspace=true`\n\
              - Workers push to their own task branch — no conflicts between parallel workers\n\
-             - Load `read_skill git-workspace` for the full conflict resolution and progress monitoring guide\n\n\
+             - After all agent_run calls return, you MUST deliver substance to the human — \
+             read the output, extract key findings, organize into clear sections\n\n\
+             ### Monitoring worker progress (coding tasks)\n\
+             - `workspace_activity()` → see all branches, ahead/behind counts, last commit per worker\n\
+             - `workspace_diff(branch)` → review a worker's changes without cloning\n\
+             - `workspace_collect(path, worker)` → merge worker's branch into your workspace\n\
+             - `workspace_conflicts(branch)` → on merge failure, see conflicting files and both diffs\n\
+             - Load `read_skill git-workspace` for the full conflict resolution guide\n\n\
              ### Limitations\n\
              - Children cannot spawn their own sub-agents (restricted RBAC)\n\
-             - Ephemeral agents have resource limits\n\
+             - Ephemeral agents have resource limits and a turn budget\n\
              - Children share your API keys but have separate memory stores\n\n",
         );
     } else {
@@ -636,15 +632,21 @@ pub fn build_preamble(
             preamble.push_str(&format!(
                 "### Agent Hierarchy\n\
                  - **Parent agent**: {parent}\n\
-                 - You were spawned by your parent to handle a specific task or domain\n\
-                 - Report progress via POST to $THAT_PARENT_GATEWAY_URL/v1/notify\n\
-                 - Focus on your assigned scope and report results\n\
-                 - You cannot spawn sub-agents of your own\n\n\
-                 ### In-cluster services\n\
-                 - The git server uses **HTTP** (not git:// protocol) — always use `http://` URLs\n\
-                 - If you have `$GIT_REPO_URL` set, use it to clone the shared workspace\n\
-                 - Do NOT manually construct git server URLs — use the workspace tools or `$GIT_REPO_URL`\n\
-                 - Use `agent_query` to communicate with your parent by name\n"
+                 - You were spawned to handle a specific task — focus on your assigned scope\n\
+                 - You cannot spawn sub-agents of your own (restricted RBAC)\n\n\
+                 ### Your workflow\n\
+                 1. Do your assigned work using the tools available to you\n\
+                 2. If `$GIT_REPO_URL` is set, clone it to get the shared workspace: \
+                 `git clone $GIT_REPO_URL` (it uses HTTP — never git:// protocol)\n\
+                 3. Commit and push your changes to your task branch: \
+                 `git push $GIT_REPO_URL HEAD:refs/heads/task/$THAT_AGENT_NAME`\n\
+                 4. Your final text output is returned directly to the parent — make it complete and structured\n\n\
+                 ### Communication\n\
+                 - Your final output (last assistant message) is what the parent receives as the agent_run result\n\
+                 - For progress updates during long work: POST to `$THAT_PARENT_GATEWAY_URL/v1/notify`\n\
+                 - Do NOT use `agent_query` — you are an ephemeral worker, not a persistent agent\n\
+                 - Do NOT manually construct service URLs — use environment variables\n\
+                 - Do NOT try to access the parent's filesystem — use the git workspace for code sharing\n"
             ));
         } else {
             preamble.push_str(&format!(
