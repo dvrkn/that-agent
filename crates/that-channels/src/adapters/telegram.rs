@@ -760,12 +760,18 @@ impl Channel for TelegramAdapter {
                 }
 
                 let mut state = self.state.lock().await;
-                let message = state
-                    .token_buffers
-                    .remove(&stream_key)
-                    .filter(|buf| !buf.is_empty())
-                    .unwrap_or_else(|| text.clone());
+                let buffered = state.token_buffers.remove(&stream_key);
                 drop(state);
+
+                // If the Done event carries explicit text (from the `answer` tool),
+                // use it — it's the agent's complete final response. The streaming
+                // buffer may only contain a short preamble the agent emitted before
+                // calling answer.
+                let message = if !text.is_empty() {
+                    text.clone()
+                } else {
+                    buffered.filter(|b| !b.is_empty()).unwrap_or_default()
+                };
                 if !message.is_empty() {
                     self.send_text(&chat_id, &message).await?;
                 }
