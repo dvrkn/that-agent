@@ -272,6 +272,12 @@ pub async fn spawn_persistent_agent_k8s(
     let labels = agent_labels(name, parent, "persistent", role_str);
     let owner_ref = owner_reference(&parent_deploy, &deploy_uid);
 
+    // Forward auth credentials so children share the parent's rate limits.
+    let extra_env = std::env::var("CLAUDE_CODE_AUTH")
+        .ok()
+        .map(|v| format!("  CLAUDE_CODE_AUTH: \"{v}\"\n"))
+        .unwrap_or_default();
+
     let yaml = format!(
         r#"---
 apiVersion: v1
@@ -319,7 +325,7 @@ data:
   THAT_PARENT_GATEWAY_URL: "{parent_gw}"
   THAT_PARENT_GATEWAY_TOKEN: "{gw_token}"
   THAT_SANDBOX_K8S_NAMESPACE: "{ns}"
----
+{extra_env}---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -482,6 +488,15 @@ pub async fn run_ephemeral_agent_k8s(
         "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8",
         "THAT_SANDBOX_K8S_NAMESPACE": ns,
     });
+
+    // Forward auth/credential env vars so children share the parent's rate limits.
+    // API keys are already in that-agent-secrets (mounted via envFrom).
+    // CLAUDE_CODE_AUTH is an OAuth token that may only exist on the parent Deployment.
+    for key in ["CLAUDE_CODE_AUTH"] {
+        if let Ok(val) = std::env::var(key) {
+            config_data[key] = serde_json::json!(val);
+        }
+    }
     if workspace {
         config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));
         config_data["GIT_BRANCH"] = serde_json::json!(format!("task/{safe_name}"));
