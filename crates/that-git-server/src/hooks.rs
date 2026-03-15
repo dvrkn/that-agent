@@ -19,13 +19,14 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
             );
 
             // Webhook notification (per-repo URL, then global fallback)
+            // Payload must include "message" field for /v1/notify compatibility.
             if let Some(url) = state.webhook_url_for(&repo) {
                 let payload = serde_json::json!({
+                    "message": format!("git push: {agent_str} pushed {branch} to {repo} ({})", &r.new[..8.min(r.new.len())]),
+                    "agent": format!("git-server/{agent_str}"),
                     "event": "push",
                     "repo": repo,
                     "branch": branch,
-                    "agent": agent_str,
-                    "old_commit": r.old,
                     "commit": r.new,
                 });
                 let client = reqwest::Client::new();
@@ -151,6 +152,8 @@ async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
                     // Notify success via webhook
                     if let Some(url) = state.webhook_url_for(repo) {
                         let payload = serde_json::json!({
+                            "message": format!("auto-merged {branch} into main in {repo}"),
+                            "agent": "git-server",
                             "event": "auto_merge",
                             "repo": repo,
                             "branch": branch,
@@ -178,6 +181,8 @@ async fn auto_merge(state: &AppState, repo: &str, branch: &str) {
             info!("auto-merge skipped (conflict) for {branch} in {repo}: {conflicting_files:?}");
             if let Some(url) = state.webhook_url_for(repo) {
                 let payload = serde_json::json!({
+                    "message": format!("merge conflict: {branch} in {repo} — files: {conflicting_files:?}"),
+                    "agent": "git-server",
                     "event": "merge_conflict",
                     "repo": repo,
                     "branch": branch,
