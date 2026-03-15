@@ -446,44 +446,20 @@ pub async fn run_ephemeral_agent_k8s(
     let role_str = role.unwrap_or("");
 
     if workspace {
-        // Resolve the parent's actual workspace path
-        let ws_dir = crate::config::AgentDef::agent_workspace_dir(parent);
-        let ws_path = ws_dir.to_string_lossy();
-
-        // Verify workspace is a git repo with commits before pushing
-        let rev_check = tokio::process::Command::new("git")
-            .args(["-C", &*ws_path, "rev-parse", "HEAD"])
-            .output()
+        // Verify the workspace repo exists on the git server (workspace_share must have been called).
+        let check = reqwest::Client::new()
+            .get(format!("{git_svc}/api/repos/workspace/activity"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
             .await;
-        match rev_check {
-            Ok(o) if o.status.success() => {}
+        match check {
+            Ok(resp) if resp.status().is_success() => {}
             _ => {
                 anyhow::bail!(
-                    "workspace=true but {} is not a git repo with commits. \
-                     Call workspace_share(path) first to push your repo to the git server.",
-                    ws_path
+                    "workspace=true but no workspace repo found on the git server. \
+                     Call workspace_share(path) first to push your repo."
                 );
             }
-        }
-
-        // Push workspace to git-server for the worker to clone
-        let push = tokio::process::Command::new("git")
-            .args([
-                "-C",
-                &*ws_path,
-                "push",
-                &format!("{git_svc}/workspace.git"),
-                &format!("HEAD:refs/heads/task/{safe_name}"),
-                "--force",
-            ])
-            .output()
-            .await?;
-        if !push.status.success() {
-            let stderr = String::from_utf8_lossy(&push.stderr);
-            anyhow::bail!(
-                "Failed to push workspace to git server: {stderr}. \
-                 Ensure workspace_share(path) was called first."
-            );
         }
     }
 
@@ -676,21 +652,8 @@ pub async fn run_ephemeral_agent_k8s(
 
     let elapsed = start.elapsed().as_secs();
 
-    // If workspace mode, collect the branch info
-    if workspace {
-        let ws_dir = crate::config::AgentDef::agent_workspace_dir(parent);
-        let ws_path = ws_dir.to_string_lossy();
-        let _ = tokio::process::Command::new("git")
-            .args([
-                "-C",
-                &*ws_path,
-                "fetch",
-                &format!("{git_svc}/workspace.git"),
-                &format!("task/{safe_name}"),
-            ])
-            .output()
-            .await;
-    }
+    // Note: workspace branch collection is handled by workspace_collect(path, worker),
+    // not auto-fetched here. The orchestrator calls it explicitly after agent_run returns.
 
     Ok(serde_json::json!({
         "name": name,
