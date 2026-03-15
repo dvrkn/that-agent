@@ -47,6 +47,19 @@ pub fn normalize_model(model: &str) -> String {
     }
 }
 
+/// Return the context window size (in tokens) for a model.
+/// Used to compute dynamic compaction thresholds instead of hardcoded values.
+pub fn context_window(model: &str) -> u32 {
+    match model {
+        // Anthropic 4.6/4.5 — 1M context
+        "claude-opus-4-6" | "claude-sonnet-4-6" | "claude-haiku-4-5" => 1_000_000,
+        // OpenAI Codex — 1M context
+        "gpt-5.2-codex" | "gpt-5.1-codex-mini" => 1_000_000,
+        // Fallback for unknown models — conservative 200k
+        _ => 200_000,
+    }
+}
+
 pub fn suggested_models(provider: &str) -> Vec<String> {
     match provider {
         "openai" | "anthropic" | "openrouter" => MODEL_OPTIONS

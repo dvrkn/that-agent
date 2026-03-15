@@ -86,11 +86,10 @@ pub struct InterruptedRun {
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Minimum consecutive base64-alphabet chars to flag a blob.
 const BASE64_BLOB_MIN_LEN: usize = 1_000;
-/// Input-token threshold at which the orchestrator warns the agent to compact.
-/// At this point the context is large enough that a long response risks truncation.
-const CONTEXT_WARN_TOKENS: u32 = 150_000;
-/// Input-token threshold for mandatory compaction — context is critically full.
-const AUTO_COMPACT_TOKENS: u32 = 180_000;
+/// Fraction of context window at which we warn the agent to compact.
+const CONTEXT_WARN_FRACTION: f64 = 0.70;
+/// Fraction of context window at which compaction is mandatory.
+const CONTEXT_CRITICAL_FRACTION: f64 = 0.85;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -209,12 +208,24 @@ async fn run_from_checkpoint(
     let budget_half = config.max_turns / 2;
     let budget_eighty = config.max_turns * 4 / 5;
 
-    // When resuming from a checkpoint, count existing assistant messages to
-    // continue the turn counter from where we left off (not from 0).
-    let turns_consumed = messages
-        .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .count() as u32;
+    // Context window thresholds — derived from model's actual window size.
+    let ctx_window = crate::model_catalog::context_window(&config.model);
+    let context_warn_tokens = (ctx_window as f64 * CONTEXT_WARN_FRACTION) as u32;
+    let context_critical_tokens = (ctx_window as f64 * CONTEXT_CRITICAL_FRACTION) as u32;
+
+    // When resuming from a network retry checkpoint, count assistant messages
+    // AFTER the last user message to continue from where we left off.
+    // History messages (before the last user message) don't count as consumed turns.
+    let turns_consumed = {
+        let last_user = messages
+            .iter()
+            .rposition(|m| matches!(m, Message::User { .. }))
+            .unwrap_or(0);
+        messages[last_user..]
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant { .. }))
+            .count() as u32
+    };
 
     for turn in turns_consumed..config.max_turns {
         // Drain steering hints queued by the human between turns.
@@ -609,30 +620,37 @@ async fn run_from_checkpoint(
 
         // If context is getting large, warn the agent before its next turn so it
         // calls mem_compact proactively — preventing response truncation mid-tool-call.
-        if usage.input_tokens > AUTO_COMPACT_TOKENS {
+        let pct = if ctx_window > 0 {
+            (usage.input_tokens as f64 / ctx_window as f64 * 100.0) as u32
+        } else {
+            0
+        };
+        if usage.input_tokens > context_critical_tokens {
             warn!(
                 input_tokens = usage.input_tokens,
-                threshold = AUTO_COMPACT_TOKENS,
-                "Context critically full — injecting mandatory mem_compact"
+                context_window = ctx_window,
+                usage_pct = pct,
+                "Context {pct}% full — injecting mandatory mem_compact"
             );
-            messages.push(Message::user(
-                "<system-reminder>\ncontext_pressure: critical\n\
-                 Your context window is critically full. You MUST call mem_compact NOW as \
+            messages.push(Message::user(format!(
+                "<system-reminder>\ncontext_pressure: critical ({pct}% of {ctx_window} tokens)\n\
+                 Your context window is {pct}% full. You MUST call mem_compact NOW as \
                  your very first action this turn — no other tool calls before it. Failure \
-                 to compact will cause response truncation and lost work.\n</system-reminder>",
-            ));
-        } else if usage.input_tokens > CONTEXT_WARN_TOKENS {
+                 to compact will cause response truncation and lost work.\n</system-reminder>"
+            )));
+        } else if usage.input_tokens > context_warn_tokens {
             warn!(
                 input_tokens = usage.input_tokens,
-                threshold = CONTEXT_WARN_TOKENS,
-                "Context approaching limit — injecting mem_compact reminder"
+                context_window = ctx_window,
+                usage_pct = pct,
+                "Context {pct}% full — injecting mem_compact reminder"
             );
-            messages.push(Message::user(
-                "<system-reminder>\ncontext_pressure: high\n\
-                 Your context window is nearly full. Call mem_compact NOW as your first \
+            messages.push(Message::user(format!(
+                "<system-reminder>\ncontext_pressure: high ({pct}% of {ctx_window} tokens)\n\
+                 Your context window is {pct}% full. Call mem_compact NOW as your first \
                  action this turn to preserve the session before the window fills and \
-                 responses get truncated.\n</system-reminder>",
-            ));
+                 responses get truncated.\n</system-reminder>"
+            )));
         }
 
         debug!(turn = current, "Loop turn complete, continuing");
