@@ -918,15 +918,16 @@ async fn handle_notify(
         Err(resp) => return resp,
     };
 
-    let sender = body
-        .agent
-        .as_deref()
-        .or(body.sender_id.as_deref())
-        .unwrap_or("unknown");
+    let sender = body.agent.as_deref().or(body.sender_id.as_deref());
+    let text = if let Some(s) = sender {
+        format!("[{s}] {}", body.message)
+    } else {
+        body.message.clone()
+    };
     let msg = InboundMessage {
         channel_id: state.adapter_id.clone(),
         sender_id: NOTIFY_SENDER_ID.to_string(),
-        text: format!("[{}] {}", sender, body.message),
+        text,
         message_id: None,
         conversation_id: None,
         session_hint: None,

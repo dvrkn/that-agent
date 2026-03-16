@@ -2098,10 +2098,16 @@ async fn run_agent_for_sender(
             history.push(Message::assistant(&text));
             if let Some(url) = callback_url {
                 let t = text.clone();
+                let agent = sender_id.clone();
                 tokio::spawn(async move {
                     let _ = reqwest::Client::new()
                         .post(&url)
-                        .json(&serde_json::json!({ "text": t }))
+                        .json(&serde_json::json!({
+                            "text": t,
+                            "state": "completed",
+                            "message": t,
+                            "agent": agent,
+                        }))
                         .timeout(std::time::Duration::from_secs(10))
                         .send()
                         .await;
