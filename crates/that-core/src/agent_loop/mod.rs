@@ -109,6 +109,17 @@ pub struct ToolContext {
     pub agent_name: String,
 }
 
+impl ToolContext {
+    /// Return the agent name for use as sender_id in inter-agent communication.
+    pub fn sender_name(&self) -> &str {
+        if self.agent_name.is_empty() {
+            "parent"
+        } else {
+            &self.agent_name
+        }
+    }
+}
+
 /// All parameters for a single `run()` invocation.
 pub struct LoopConfig {
     pub provider: String,

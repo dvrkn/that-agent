@@ -84,6 +84,261 @@ impl AgentRegistry {
     }
 }
 
+// ── Agent Task Registry ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskState {
+    Submitted,
+    Working,
+    InputRequired,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+impl std::fmt::Display for AgentTaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Submitted => write!(f, "submitted"),
+            Self::Working => write!(f, "working"),
+            Self::InputRequired => write!(f, "input_required"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Canceled => write!(f, "canceled"),
+        }
+    }
+}
+
+impl std::str::FromStr for AgentTaskState {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_value(serde_json::Value::String(s.to_string()))
+            .map_err(|_| format!("unknown task state: {s}"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskMessage {
+    pub from: String,
+    pub text: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTask {
+    pub id: String,
+    pub agent: String,
+    pub state: AgentTaskState,
+    pub created_at: String,
+    pub updated_at: String,
+    pub result: Option<String>,
+    pub messages: Vec<TaskMessage>,
+}
+
+/// File-backed registry of agent tasks at `<cluster_dir>/agent_tasks.json`.
+#[derive(Debug)]
+pub struct AgentTaskRegistry {
+    path: PathBuf,
+}
+
+/// Max terminal (completed/failed) tasks kept in the registry before pruning.
+const MAX_TERMINAL_TASKS: usize = 100;
+/// Max messages per task to prevent context bloat.
+const MAX_MESSAGES_PER_TASK: usize = 30;
+
+impl AgentTaskRegistry {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Derive registry from a memory DB path (convenience).
+    pub fn from_db_path(db_path: &Path) -> Option<Self> {
+        cluster_dir_from_db(db_path).map(|d| Self::new(d.join("agent_tasks.json")))
+    }
+
+    pub fn create(&self, agent: &str, message: &str) -> Result<AgentTask> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let task = AgentTask {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: agent.to_string(),
+            state: AgentTaskState::Submitted,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            result: None,
+            messages: vec![TaskMessage {
+                from: "parent".into(),
+                text: message.to_string(),
+                timestamp: now,
+            }],
+        };
+        let mut tasks = self.load()?;
+        tasks.push(task.clone());
+        Self::prune_terminal(&mut tasks);
+        self.save(&tasks)?;
+        Ok(task)
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<AgentTask>> {
+        Ok(self.load()?.into_iter().find(|t| t.id == id))
+    }
+
+    pub fn list_active(&self) -> Result<Vec<AgentTask>> {
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter(|t| !matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed))
+            .collect())
+    }
+
+    /// Get a task and update it in a single load/save cycle.
+    /// Returns the task snapshot *before* the mutation (for reading original data).
+    pub fn get_and_update<F>(&self, id: &str, mutate: F) -> Result<Option<AgentTask>>
+    where
+        F: FnOnce(&mut AgentTask),
+    {
+        let mut tasks = self.load()?;
+        let snapshot = tasks.iter().find(|t| t.id == id).cloned();
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
+            mutate(task);
+        }
+        self.save(&tasks)?;
+        Ok(snapshot)
+    }
+
+    pub fn update_state(
+        &self,
+        id: &str,
+        state: AgentTaskState,
+        message: Option<&str>,
+    ) -> Result<()> {
+        let mut tasks = self.load()?;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
+            let now = chrono::Utc::now().to_rfc3339();
+            task.state = state;
+            task.updated_at = now.clone();
+            if let Some(msg) = message {
+                if matches!(
+                    task.state,
+                    AgentTaskState::Completed | AgentTaskState::Failed
+                ) {
+                    task.result = Some(msg.to_string());
+                }
+                task.messages.push(TaskMessage {
+                    from: task.agent.clone(),
+                    text: msg.to_string(),
+                    timestamp: now,
+                });
+                Self::cap_messages(task);
+            }
+        }
+        self.save(&tasks)
+    }
+
+    pub fn append_message(&self, id: &str, from: &str, text: &str) -> Result<()> {
+        let mut tasks = self.load()?;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
+            let now = chrono::Utc::now().to_rfc3339();
+            task.updated_at = now.clone();
+            task.messages.push(TaskMessage {
+                from: from.to_string(),
+                text: text.to_string(),
+                timestamp: now,
+            });
+            Self::cap_messages(task);
+        }
+        self.save(&tasks)
+    }
+
+    fn cap_messages(task: &mut AgentTask) {
+        if task.messages.len() > MAX_MESSAGES_PER_TASK {
+            task.messages = task
+                .messages
+                .split_off(task.messages.len() - MAX_MESSAGES_PER_TASK);
+        }
+    }
+
+    /// Remove oldest terminal tasks when the list exceeds the cap.
+    fn prune_terminal(tasks: &mut Vec<AgentTask>) {
+        let terminal: usize = tasks
+            .iter()
+            .filter(|t| matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed))
+            .count();
+        if terminal > MAX_TERMINAL_TASKS {
+            let to_remove = terminal - MAX_TERMINAL_TASKS;
+            let mut removed = 0;
+            tasks.retain(|t| {
+                if removed >= to_remove {
+                    return true;
+                }
+                if matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed) {
+                    removed += 1;
+                    return false;
+                }
+                true
+            });
+        }
+    }
+
+    fn load(&self) -> Result<Vec<AgentTask>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(data) => Ok(serde_json::from_str(&data)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn save(&self, tasks: &[AgentTask]) -> Result<()> {
+        that_channels::atomic_write_json(&self.path, tasks)
+    }
+}
+
+/// Resolve cluster dir and agent's gateway URL in one step.
+///
+/// Returns `(cluster_dir, gateway_url)`. Used by tool dispatch to avoid
+/// repeating the 6-line resolve→list→find→extract pattern.
+pub fn resolve_agent_gateway(db_path: &Path, agent_name: &str) -> Result<(PathBuf, String)> {
+    let cluster_dir =
+        cluster_dir_from_db(db_path).ok_or_else(|| anyhow::anyhow!("Cannot derive cluster dir"))?;
+    let reg = AgentRegistry::new(cluster_dir.join("agents.json"));
+    let entries = reg.list()?;
+    let entry = entries
+        .iter()
+        .find(|e| e.name == agent_name)
+        .ok_or_else(|| anyhow::anyhow!("agent '{}' not found in registry", agent_name))?;
+    let gw = entry
+        .gateway_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("agent '{}' has no gateway URL", agent_name))?
+        .to_string();
+    Ok((cluster_dir, gw))
+}
+
+/// Post a message to a sub-agent's `/v1/inbound` endpoint.
+pub async fn post_to_agent_inbound(
+    gateway_url: &str,
+    message: &str,
+    sender_id: &str,
+    callback_url: Option<&str>,
+) -> Result<()> {
+    let mut body = serde_json::json!({
+        "message": message,
+        "sender_id": sender_id,
+    });
+    if let Some(cb) = callback_url {
+        body["callback_url"] = serde_json::Value::String(cb.to_string());
+    }
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{gateway_url}/v1/inbound"))
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 // ── Spawn (local) ────────────────────────────────────────────────────────────
 
 /// Spawn a named sub-agent in the background and register it.

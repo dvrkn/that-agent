@@ -133,6 +133,26 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
 }
 
 /// Replace `{key}` placeholders in a template string with their runtime values.
+fn task_delegation_preamble() -> &'static str {
+    "### Task-based delegation (async, preferred)\n\n\
+     - `agent_task_send(name, message)` — dispatch task, get task_id immediately\n\
+     - `agent_task_send(name, message, task_id=X)` — steer a running task\n\
+     - `agent_task_status()` — check all tasks (free local read, zero cost)\n\
+     - `agent_task_cancel(task_id)` — graceful stop\n\
+     - `agent_task_resume(task_id)` — resume canceled task\n\n\
+     Task states: submitted → working → input_required → completed/failed/canceled\n\n\
+     Task updates arrive in your heartbeat check-in. Use `agent_task_status()` proactively — it costs nothing.\n\
+     When a task is `input_required`, the sub-agent needs your input — reply with `agent_task_send(task_id=X)` or ask the human.\n\
+     **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless you spot something worth steering.\n\n\
+     | Pattern | Tool | When |\n\
+     |---------|------|------|\n\
+     | Tracked async work | `agent_task_send` | Default for any real work |\n\
+     | Steer running task | `agent_task_send(task_id=X)` | Redirect, add context |\n\
+     | Quick answer needed | `agent_query` | Simple questions, <30s |\n\
+     | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\n\
+     Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n"
+}
+
 fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template.to_string();
     for (key, value) in vars {
@@ -556,16 +576,11 @@ pub fn build_preamble(
              - `workspace_diff(branch)` → review a worker's changes without cloning\n\
              - `workspace_collect(path, worker)` → merge worker's branch into your workspace\n\
              - `workspace_conflicts(branch)` → on merge failure, see conflicting files and both diffs\n\
-             - Load `read_skill git-workspace` for the full conflict resolution guide\n\n\
-             ### Agent query modes\n\n\
-             When querying a persistent sub-agent, choose the right mode:\n\n\
-             | Tool | Behavior | Use when |\n\
-             |------|----------|----------|\n\
-             | `agent_query(name, message)` | Blocks until done, returns full response | Quick tasks where you need the answer immediately |\n\
-             | `agent_query(name, message, stream=true)` | Streams: sub-agent tool calls visible on channel in real-time | Visible work, user wants to see progress |\n\
-             | `agent_query_async(name, message)` | Returns immediately, result arrives as notification | Long tasks, parallel delegation, check back via heartbeat |\n\n\
-             Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n\
-             ### Limitations\n\
+             - Load `read_skill git-workspace` for the full conflict resolution guide\n\n",
+        );
+        preamble.push_str(task_delegation_preamble());
+        preamble.push_str(
+            "### Limitations\n\
              - Children cannot spawn their own sub-agents (restricted RBAC)\n\
              - Ephemeral agents have resource limits and a turn budget\n\
              - Children share your API keys but have separate memory stores\n\n",
@@ -632,17 +647,9 @@ pub fn build_preamble(
          The parent queues the request and processes it at the next heartbeat tick, then POSTs \
          `{\"text\": \"<response>\"}` back to your `callback_url`.\n\n\
          Use `/v1/notify` for progress updates. Use `/v1/inbound` + `callback_url` only \
-         when you genuinely need the parent to reason and respond.\n\n\
-         ### Agent query modes\n\n\
-         When querying a persistent sub-agent, choose the right mode:\n\n\
-         | Tool | Behavior | Use when |\n\
-         |------|----------|----------|\n\
-         | `agent_query(name, message)` | Blocks until done, returns full response | Quick tasks where you need the answer immediately |\n\
-         | `agent_query(name, message, stream=true)` | Streams: sub-agent tool calls visible on channel in real-time | Visible work, user wants to see progress |\n\
-         | `agent_query_async(name, message)` | Returns immediately, result arrives as notification | Long tasks, parallel delegation, check back via heartbeat |\n\n\
-         Sub-agent notifications (via `/v1/notify`) are now relayed to the channel immediately \
-         AND queued for your next heartbeat turn — the user sees them in real-time.\n\n",
+         when you genuinely need the parent to reason and respond.\n\n",
         );
+        preamble.push_str(task_delegation_preamble());
     }
 
     // ── 11.6. Agent Hierarchy — parent/child context ─────────────────────────

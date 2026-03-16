@@ -1189,8 +1189,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "agent_query".into(),
-            description: "Send a message to a persistent agent and return its response. \
-                Only works for agents with a gateway (persistent, not ephemeral). \
+            description: "Send a synchronous message to a persistent agent and block until response. \
+                Best for quick one-shot questions (<30s). For longer work, prefer agent_task_send. \
                 Set stream=true to relay the sub-agent's tool calls to the channel in real-time.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1205,9 +1205,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "agent_query_async".into(),
-            description: "Send a message to a persistent agent asynchronously and return immediately. \
-                The sub-agent processes the request in the background and posts its result back \
-                as a notification. Use for long-running tasks or parallel delegation.".into(),
+            description: "Deprecated — use agent_task_send for tracked async delegation. \
+                Sends a fire-and-forget message with no task tracking.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1215,6 +1214,59 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "message": { "type": "string", "description": "Message to send" }
                 },
                 "required": ["name", "message"]
+            }),
+        },
+        ToolDef {
+            name: "agent_task_send".into(),
+            description: "Dispatch a task to a sub-agent asynchronously and return immediately with a \
+                task_id for tracking. The sub-agent processes the task in the background. Use \
+                agent_task_status to check progress. Pass an existing task_id to send a follow-up \
+                message (steering) to a running task.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the target agent" },
+                    "message": { "type": "string", "description": "Task description or follow-up message" },
+                    "task_id": { "type": "string", "description": "Existing task ID to send a follow-up to. Omit to create a new task." }
+                },
+                "required": ["name", "message"]
+            }),
+        },
+        ToolDef {
+            name: "agent_task_status".into(),
+            description: "Check agent task status. Zero cost — reads from local file, no API call. \
+                Without task_id returns a summary of all active tasks. With task_id returns full \
+                detail including message history.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Specific task ID to query. Omit for all active tasks." }
+                }
+            }),
+        },
+        ToolDef {
+            name: "agent_task_cancel".into(),
+            description: "Cancel a running task. Sets the task state to canceled and sends a \
+                cancellation message to the sub-agent. The sub-agent winds down at its next \
+                processing cycle. Use agent_task_resume to restart later.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID to cancel" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "agent_task_resume".into(),
+            description: "Resume a previously canceled task. Re-sends the original task message \
+                to the sub-agent with resume context so it can pick up where it left off.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID to resume" }
+                },
+                "required": ["task_id"]
             }),
         },
         ToolDef {
@@ -2528,28 +2580,172 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
-            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let entry = entries
-                .iter()
-                .find(|e| e.name == args.name)
-                .ok_or_else(|| ToolError(format!("agent '{}' not found in registry", args.name)))?;
-            let gw = entry
-                .gateway_url
-                .as_deref()
-                .ok_or_else(|| ToolError(format!("agent '{}' has no gateway URL", args.name)))?;
-            let parent_name = if ctx.agent_name.is_empty() {
-                "parent"
-            } else {
-                &ctx.agent_name
-            };
+            let (_, gw) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
             let parent_gw = crate::orchestration::support::resolve_gateway_url();
-            crate::agents::query_agent_async(gw, parent_name, &parent_gw, &args.message)
+            crate::agents::query_agent_async(&gw, ctx.sender_name(), &parent_gw, &args.message)
                 .await
                 .map_err(|e| ToolError(e.to_string()))?;
             Ok(serde_json::json!({ "queued": true, "agent": args.name }))
+        }
+        "agent_task_send" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                message: String,
+                task_id: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (cluster_dir, gw) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let sender = ctx.sender_name();
+
+            let task_id = if let Some(tid) = &args.task_id {
+                task_reg
+                    .append_message(tid, "parent", &args.message)
+                    .map_err(|e| ToolError(e.to_string()))?;
+                tid.clone()
+            } else {
+                task_reg
+                    .create(&args.name, &args.message)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .id
+            };
+
+            let callback = format!("{parent_gw}/v1/task_update?task_id={task_id}");
+            crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "task_id": task_id, "state": "submitted" }))
+        }
+        "agent_task_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            if let Some(tid) = &args.task_id {
+                let task = task_reg
+                    .get(tid)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .ok_or_else(|| ToolError(format!("task '{}' not found", tid)))?;
+                Ok(serde_json::json!({
+                    "id": task.id,
+                    "agent": task.agent,
+                    "state": task.state.to_string(),
+                    "created_at": task.created_at,
+                    "updated_at": task.updated_at,
+                    "result": task.result,
+                    "messages": task.messages.iter().map(|m| serde_json::json!({
+                        "from": m.from, "text": m.text, "timestamp": m.timestamp
+                    })).collect::<Vec<_>>(),
+                }))
+            } else {
+                let tasks = task_reg
+                    .list_active()
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let summary: Vec<_> = tasks
+                    .iter()
+                    .map(|t| {
+                        let last = t
+                            .messages
+                            .last()
+                            .map(|m| m.text.chars().take(100).collect::<String>());
+                        serde_json::json!({
+                            "id": t.id,
+                            "agent": t.agent,
+                            "state": t.state.to_string(),
+                            "updated_at": t.updated_at,
+                            "last_message": last,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "tasks": summary }))
+            }
+        }
+        "agent_task_cancel" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            // Single load: get task data and set canceled in one pass.
+            let task = task_reg
+                .get_and_update(&args.task_id, |t| {
+                    t.state = crate::agents::AgentTaskState::Canceled;
+                    t.updated_at = chrono::Utc::now().to_rfc3339();
+                })
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            // Best-effort cancellation message to sub-agent.
+            if let Ok((_, gw)) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &task.agent)
+            {
+                let _ = crate::agents::post_to_agent_inbound(
+                    &gw,
+                    "TASK CANCELED: Wind down your current work and stop.",
+                    ctx.sender_name(),
+                    None,
+                )
+                .await;
+            }
+            Ok(serde_json::json!({ "task_id": args.task_id, "state": "canceled" }))
+        }
+        "agent_task_resume" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            // Single load: get original message and set submitted in one pass.
+            let task = task_reg
+                .get_and_update(&args.task_id, |t| {
+                    t.state = crate::agents::AgentTaskState::Submitted;
+                    t.updated_at = chrono::Utc::now().to_rfc3339();
+                })
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            let original_msg = task
+                .messages
+                .first()
+                .map(|m| m.text.clone())
+                .unwrap_or_default();
+            let (_, gw) = crate::agents::resolve_agent_gateway(
+                Path::new(&config.memory.db_path),
+                &task.agent,
+            )
+            .map_err(|e| ToolError(e.to_string()))?;
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let callback = format!("{parent_gw}/v1/task_update?task_id={}", args.task_id);
+            let resume_msg =
+                format!("Resume the following task from where you left off:\n\n{original_msg}");
+            crate::agents::post_to_agent_inbound(
+                &gw,
+                &resume_msg,
+                ctx.sender_name(),
+                Some(&callback),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "task_id": args.task_id, "state": "submitted" }))
         }
         "agent_unregister" => {
             #[derive(Deserialize)]

@@ -66,6 +66,19 @@ struct RespondRequest {
 struct NotifyRequest {
     message: String,
     agent: Option<String>,
+    /// Alias for `agent` — accepted for convenience when the caller uses
+    /// the same field name as `/v1/inbound`.
+    sender_id: Option<String>,
+}
+
+/// POST /v1/task_update request body — structured task state callback from sub-agents.
+#[derive(Debug, Deserialize)]
+struct TaskUpdateRequest {
+    state: Option<String>,
+    message: Option<String>,
+    /// Plain text response from sub-agent callback (existing callback format).
+    text: Option<String>,
+    agent: Option<String>,
 }
 
 /// A single base64-encoded attachment in an inbound webhook request.
@@ -295,6 +308,7 @@ impl Channel for HttpAdapter {
             .route("/v1/chat/respond", post(handle_chat_respond))
             .route("/v1/inbound", post(handle_inbound))
             .route("/v1/notify", post(handle_notify))
+            .route("/v1/task_update", post(handle_task_update))
             .route("/v1/schema", get(handle_schema))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -904,7 +918,11 @@ async fn handle_notify(
         Err(resp) => return resp,
     };
 
-    let sender = body.agent.as_deref().unwrap_or("unknown");
+    let sender = body
+        .agent
+        .as_deref()
+        .or(body.sender_id.as_deref())
+        .unwrap_or("unknown");
     let msg = InboundMessage {
         channel_id: state.adapter_id.clone(),
         sender_id: NOTIFY_SENDER_ID.to_string(),
@@ -929,6 +947,68 @@ async fn handle_notify(
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "queued" })),
+    )
+        .into_response()
+}
+
+/// POST /v1/task_update — structured callback for async agent task updates.
+///
+/// Accepts both structured state updates (`{state, message, agent}`) and plain
+/// callback responses (`{text}` from the existing callback mechanism). Extracts
+/// `task_id` from the URL query parameter. Pushes a formatted notification to
+/// the notification queue for the parent LLM.
+async fn handle_task_update(
+    State(state): State<Arc<HttpState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<TaskUpdateRequest>,
+) -> Response {
+    let tx = match acquire_inbound_tx(&state).await {
+        Ok(tx) => tx,
+        Err(resp) => return resp,
+    };
+
+    let task_id = params.get("task_id").cloned().unwrap_or_default();
+    let agent = body.agent.as_deref().unwrap_or("unknown");
+    // Support both structured and plain callback formats.
+    let task_state = body.state.as_deref().unwrap_or("completed");
+    let message_text = body
+        .message
+        .as_deref()
+        .or(body.text.as_deref())
+        .unwrap_or("");
+    let preview: String = message_text.chars().take(300).collect();
+
+    let notification = format!("[task:{task_id}/{agent}] {task_state}: {preview}");
+
+    let msg = InboundMessage {
+        channel_id: state.adapter_id.clone(),
+        sender_id: NOTIFY_SENDER_ID.to_string(),
+        text: notification,
+        message_id: None,
+        conversation_id: None,
+        session_hint: None,
+        attachments: vec![],
+        callback_url: None,
+        deferred: false,
+        metadata: Some(serde_json::json!({
+            "task_id": task_id,
+            "task_state": task_state,
+            "agent": agent,
+            "full_message": message_text,
+        })),
+    };
+
+    if tx.send(msg).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Inbound channel closed" })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "updated", "task_id": task_id })),
     )
         .into_response()
 }

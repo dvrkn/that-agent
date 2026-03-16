@@ -1135,7 +1135,31 @@ pub async fn run_listen(
                 if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
                     // Relay to channel immediately for user visibility.
                     router.notify_all(&msg.text).await;
-                    // Also queue for parent LLM context at next heartbeat turn.
+                    // Update task registry if this is a task_update notification.
+                    if let Some(meta) = &msg.metadata {
+                        if let (Some(task_id), Some(task_state)) = (
+                            meta.get("task_id").and_then(|v| v.as_str()),
+                            meta.get("task_state").and_then(|v| v.as_str()),
+                        ) {
+                            let cluster_dir = dirs::home_dir()
+                                .unwrap_or_default()
+                                .join(".that-agent")
+                                .join("cluster");
+                            let task_reg = crate::agents::AgentTaskRegistry::new(
+                                cluster_dir.join("agent_tasks.json"),
+                            );
+                            let Ok(state) = task_state.parse::<crate::agents::AgentTaskState>()
+                            else {
+                                warn!("Unknown task state: {task_state}");
+                                return;
+                            };
+                            let full_msg = meta
+                                .get("full_message")
+                                .and_then(|v| v.as_str());
+                            let _ = task_reg.update_state(task_id, state, full_msg);
+                        }
+                    }
+                    // Queue for parent LLM context at next heartbeat turn.
                     let mut q = notification_queue.lock().await;
                     if q.len() < 500 {
                         q.push(msg.text);
