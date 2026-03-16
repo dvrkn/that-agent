@@ -584,9 +584,42 @@ pub async fn run_listen(
             ))
             .await;
     } else {
-        router
-            .notify_all(&format!("🔄 {} restarted — back online.", agent.name))
-            .await;
+        // Build restart summary from last session + active tasks.
+        let mut summary = format!("🔄 {} restarted — back online.", agent.name);
+
+        // Last user message from the most recent channel session.
+        let channel_sessions = session_mgr.load_channel_sessions();
+        if let Some((_sender, sid)) = channel_sessions.iter().next() {
+            if let Ok(entries) = session_mgr.read_transcript(sid) {
+                let last_user_msg = entries.iter().rev().find_map(|e| match &e.event {
+                    crate::session::TranscriptEvent::UserMessage { content } => {
+                        Some(content.chars().take(200).collect::<String>())
+                    }
+                    _ => None,
+                });
+                if let Some(msg) = last_user_msg {
+                    summary.push_str(&format!("\nLast message: \"{msg}\""));
+                }
+            }
+        }
+
+        // Active task summary from task registry.
+        let task_reg = crate::agents::AgentTaskRegistry::new(state_dir.join("agent_tasks.json"));
+        if let Ok(tasks) = task_reg.list_active() {
+            if !tasks.is_empty() {
+                summary.push_str(&format!("\nActive tasks: {}", tasks.len()));
+                for t in tasks.iter().take(5) {
+                    summary.push_str(&format!("\n• {} ({}): {}", t.agent, t.state, {
+                        t.messages
+                            .last()
+                            .map(|m| m.text.chars().take(80).collect::<String>())
+                            .unwrap_or_default()
+                    }));
+                }
+            }
+        }
+
+        router.notify_all(&summary).await;
     }
 
     // ── Boot-time registry hydration ──────────────────────────────────────
