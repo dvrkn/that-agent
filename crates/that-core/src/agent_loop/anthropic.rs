@@ -381,6 +381,39 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
         }
     }
 
+    // Merge consecutive same-role messages. Steering hints, anti-loop nudges,
+    // and budget reminders can create user→user sequences after tool results.
+    // Anthropic's API rejects consecutive messages with the same role.
+    let mut merged: Vec<serde_json::Value> = Vec::with_capacity(out.len());
+    for msg in out {
+        let dominated = merged
+            .last()
+            .map(|prev| prev["role"] == msg["role"])
+            .unwrap_or(false);
+        if dominated {
+            // Append content blocks from msg into the previous message.
+            let prev = merged.last_mut().unwrap();
+            let new_blocks = if msg["content"].is_string() {
+                vec![serde_json::json!({ "type": "text", "text": msg["content"] })]
+            } else if let Some(arr) = msg["content"].as_array() {
+                arr.clone()
+            } else {
+                vec![]
+            };
+            // Ensure prev content is in array form.
+            if prev["content"].is_string() {
+                let text = prev["content"].as_str().unwrap_or("").to_string();
+                prev["content"] = serde_json::json!([{ "type": "text", "text": text }]);
+            }
+            if let Some(arr) = prev["content"].as_array_mut() {
+                arr.extend(new_blocks);
+            }
+        } else {
+            merged.push(msg);
+        }
+    }
+    let mut out = merged;
+
     // Add cache breakpoint to the last user-role message so the entire
     // conversation prefix is cached across turns. We skip adding it when
     // the last message is also the only message (turn 1) — in that case
@@ -413,4 +446,66 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
 /// (prefix `sk-ant-oat`) rather than a regular API key.
 fn is_oauth_token(token: &str) -> bool {
     token.starts_with("sk-ant-oat")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_results_followed_by_user_message_alternate_roles() {
+        // Anti-loop and steering hints inject User messages after tool results.
+        // Anthropic requires strict user/assistant alternation — verify no
+        // consecutive same-role messages are produced.
+        let messages = vec![
+            Message::user("do the task"),
+            Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    call_id: "call_1".into(),
+                    name: "shell_exec".into(),
+                    args_json: r#"{"cmd":"ls"}"#.into(),
+                }],
+            },
+            Message::Tool {
+                call_id: "call_1".into(),
+                name: "shell_exec".into(),
+                content: "file.txt".into(),
+                images: vec![],
+            },
+            // Injected by anti-loop or steering — user message after tool result
+            Message::user("You have been exploring too long. Stop."),
+        ];
+
+        let wire = messages_to_anthropic(&messages, false);
+        let arr = wire.as_array().unwrap();
+        let mut prev_role = "";
+        for (i, msg) in arr.iter().enumerate() {
+            let role = msg["role"].as_str().unwrap();
+            assert_ne!(
+                role, prev_role,
+                "consecutive '{role}' roles at index {i}: {msg}"
+            );
+            prev_role = role;
+        }
+    }
+
+    #[test]
+    fn cache_control_added_to_last_user_message() {
+        let messages = vec![
+            Message::user("first"),
+            Message::assistant("ok"),
+            Message::user("second"),
+        ];
+        let wire = messages_to_anthropic(&messages, true);
+        let arr = wire.as_array().unwrap();
+        let last_user = arr.iter().rposition(|m| m["role"] == "user").unwrap();
+        let content = &arr[last_user]["content"];
+        assert!(content.is_array());
+        let last_block = content.as_array().unwrap().last().unwrap();
+        assert_eq!(
+            last_block["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
+    }
 }

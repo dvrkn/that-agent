@@ -262,9 +262,6 @@ pub async fn execute_agent_run_streaming(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
-                    if checkpoint_messages.is_some() {
-                        attempt = 0;
-                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
@@ -402,9 +399,6 @@ pub async fn execute_agent_run_eval(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
-                    if checkpoint_messages.is_some() {
-                        attempt = 0;
-                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
@@ -873,11 +867,6 @@ pub async fn execute_agent_run_channel(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
-                    // Reset retry counter if the agent made progress since the last error
-                    // (new tool events means turns completed successfully before this failure).
-                    if !tool_events.is_empty() {
-                        attempt = 0;
-                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
@@ -910,7 +899,8 @@ pub async fn execute_agent_run_channel(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_channel_finalization_prompt, channel_config_env_lines, resolved_agent_config_path,
+        build_channel_finalization_prompt, channel_config_env_lines, is_retryable_error,
+        resolved_agent_config_path,
     };
 
     #[test]
@@ -955,5 +945,53 @@ mod tests {
     fn sandbox_agent_config_path_prefers_config_toml_layout() {
         let path = resolved_agent_config_path("demo", true);
         assert_eq!(path, "/home/agent/.that-agent/agents/demo/config.toml");
+    }
+
+    #[test]
+    fn retryable_error_matches_server_errors() {
+        let err = anyhow::anyhow!("Anthropic API error 500 Internal Server Error");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_timeout() {
+        let err = anyhow::anyhow!("operation timed out after 90s");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_rate_limit() {
+        let err = anyhow::anyhow!("HTTP 429 rate limit exceeded");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_connection_reset() {
+        let err = anyhow::anyhow!("connection reset by peer");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_overloaded() {
+        let err = anyhow::anyhow!("API is overloaded, please retry");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_auth_errors() {
+        let err = anyhow::anyhow!("401 Unauthorized: invalid API key");
+        assert!(!is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_bad_request() {
+        let err = anyhow::anyhow!("400 Bad Request: invalid message format");
+        assert!(!is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_permission_denied() {
+        let err = anyhow::anyhow!("403 Forbidden: model not available for your plan");
+        assert!(!is_retryable_error(&err));
     }
 }

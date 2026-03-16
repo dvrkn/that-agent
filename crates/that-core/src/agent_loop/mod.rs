@@ -46,15 +46,17 @@ use crate::tools::typed::dispatch as dispatch_tool;
 /// API issues may produce genuine 90s silences that trigger retries.
 pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
 
-/// Shared HTTP client with connect and read timeouts. Reuses connection pool across all LLM calls.
+/// Shared HTTP client with connect timeout only. No total-request timeout — SSE
+/// streams can run for minutes. Idle connections expire after 30s to avoid reusing
+/// stale connections after a mid-stream failure.
 pub(super) fn llm_http_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(300))
             .pool_max_idle_per_host(4)
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
