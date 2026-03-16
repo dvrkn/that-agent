@@ -735,6 +735,19 @@ pub async fn spawn_persistent_agent_k8s(
                 "data": config_data,
             },
             {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {
+                    "name": format!("{sa_name}-home"),
+                    "namespace": ns,
+                    "labels": labels,
+                },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": { "requests": { "storage": "1Gi" } },
+                }
+            },
+            {
                 "apiVersion": "apps/v1",
                 "kind": "Deployment",
                 "metadata": {
@@ -777,7 +790,10 @@ pub async fn spawn_persistent_agent_k8s(
                                 },
                                 "volumeMounts": [{ "name": "agent-home", "mountPath": "/home/agent/.that-agent" }],
                             }],
-                            "volumes": [{ "name": "agent-home", "emptyDir": {} }],
+                            "volumes": [{
+                                "name": "agent-home",
+                                "persistentVolumeClaim": { "claimName": format!("{sa_name}-home") }
+                            }],
                         }
                     }
                 }
