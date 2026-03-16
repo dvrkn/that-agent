@@ -990,12 +990,11 @@ pub async fn run_listen(
                     if !pending_inbound.is_empty() {
                         task.push_str("\n\n## Pending inbound requests:\n");
                         for m in &pending_inbound {
-                            let text_preview: String = m.text.chars().take(500).collect();
                             let cb = m.callback_url.as_deref().unwrap_or("no callback");
                             let attach_count = m.attachments.len();
                             task.push_str(&format!(
-                                "- [sender: {}] {} (callback: {}) [{} attachments]\n",
-                                m.sender_id, text_preview, cb, attach_count
+                                "### [sender: {}] (callback: {}) [{} attachments]\n{}\n\n",
+                                m.sender_id, cb, attach_count, m.text
                             ));
                         }
 
