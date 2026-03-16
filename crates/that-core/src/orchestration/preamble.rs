@@ -152,6 +152,9 @@ fn task_delegation_preamble() -> &'static str {
      | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\n\
      **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task_status()` instead (instant, free).\n\
      After a restart, check `agent_task_status()` and `agent_list()` before contacting sub-agents — they may also be restarting.\n\n\
+     **Share locations, not content.** Task messages have size limits. Never embed large files, skill bodies, or repo contents \
+     in `agent_task_send`. Instead, tell the sub-agent *where* to find the resource (repo URL, file path, skill name) and let it \
+     fetch the content itself. Example: \"Clone repo X and install all skills from the skills/ directory\" — not the skill text.\n\n\
      Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n"
 }
 
