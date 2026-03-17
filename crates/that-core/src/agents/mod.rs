@@ -708,8 +708,10 @@ pub async fn spawn_persistent_agent_k8s(
         "SLACK_BOT_TOKEN": "",
         "SLACK_APP_TOKEN": "",
     });
-    if let Ok(auth) = std::env::var("CLAUDE_CODE_AUTH") {
-        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(auth);
+    if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
+        config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
+        config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
+        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(token);
     }
 
     // Apply caller-provided env overrides (e.g. a dedicated TELEGRAM_BOT_TOKEN).
@@ -927,13 +929,12 @@ pub async fn run_ephemeral_agent_k8s(
         "THAT_SANDBOX_K8S_NAMESPACE": ns,
     });
 
-    // Forward auth/credential env vars so children share the parent's rate limits.
-    // API keys are already in that-agent-secrets (mounted via envFrom).
-    // CLAUDE_CODE_AUTH is an OAuth token that may only exist on the parent Deployment.
-    for key in ["CLAUDE_CODE_AUTH"] {
-        if let Ok(val) = std::env::var(key) {
-            config_data[key] = serde_json::json!(val);
-        }
+    // Forward Claude Code OAuth aliases so children inherit the parent's token
+    // even when only the parent Deployment has it set.
+    if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
+        config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
+        config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
+        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(token);
     }
     if workspace {
         config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));

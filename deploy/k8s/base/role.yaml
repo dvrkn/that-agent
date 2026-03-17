@@ -27,6 +27,11 @@ rules:
     resources:
       - jobs
     verbs: ["get", "list", "watch", "create", "delete"]
+  # Networking — manage ingresses for exposing agent services
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # RBAC — create RoleBindings to pre-deployed child Roles (no Role creation needed)
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:

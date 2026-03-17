@@ -107,7 +107,13 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                         api_key.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty())
                     {
                         let env_key = match defaults.provider.as_str() {
-                            "anthropic" => "ANTHROPIC_API_KEY",
+                            "anthropic" => {
+                                if that_core::auth::is_anthropic_oauth_token(value) {
+                                    "CLAUDE_CODE_OAUTH_TOKEN"
+                                } else {
+                                    "ANTHROPIC_API_KEY"
+                                }
+                            }
                             "openai" => "OPENAI_API_KEY",
                             "openrouter" => "OPENROUTER_API_KEY",
                             other => anyhow::bail!(

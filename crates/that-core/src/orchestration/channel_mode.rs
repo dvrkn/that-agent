@@ -303,10 +303,16 @@ fn model_menu_markup(
             .collect::<Vec<_>>();
         rows.push(row);
     }
-    rows.push(vec![that_channels::InlineButton {
-        text: "Back".into(),
-        callback_data: "/models".into(),
-    }]);
+    rows.push(vec![
+        that_channels::InlineButton {
+            text: "✏️ Custom".into(),
+            callback_data: format!("/models {provider} __custom__"),
+        },
+        that_channels::InlineButton {
+            text: "Back".into(),
+            callback_data: "/models".into(),
+        },
+    ]);
     Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
 }
 
@@ -442,6 +448,18 @@ async fn handle_models_command(
                         Some(target),
                     )
                     .await;
+                return;
+            }
+            if model == "__custom__" {
+                let msg = that_channels::OutboundMessage {
+                    text: format!("Type the model ID for {provider}:"),
+                    parse_mode: Some(that_channels::ParseMode::Plain),
+                    reply_markup: Some(that_channels::ReplyMarkup::ForceReply {
+                        input_field_placeholder: Some(format!("/models {provider} model-id")),
+                    }),
+                    reply_to_message_id: target.reply_to_message_id.clone(),
+                };
+                let _ = router.send_message(channel_id, msg, Some(target)).await;
                 return;
             }
             let prefs = ChannelPreferences {

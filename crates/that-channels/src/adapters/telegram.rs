@@ -985,6 +985,18 @@ impl Channel for TelegramAdapter {
                 crate::message::ReplyMarkup::RemoveKeyboard => {
                     serde_json::json!({ "remove_keyboard": true })
                 }
+                crate::message::ReplyMarkup::ForceReply {
+                    input_field_placeholder,
+                } => {
+                    let mut v = serde_json::json!({
+                        "force_reply": true,
+                        "selective": true,
+                    });
+                    if let Some(placeholder) = input_field_placeholder {
+                        v["input_field_placeholder"] = placeholder.clone().into();
+                    }
+                    v
+                }
             };
         }
 

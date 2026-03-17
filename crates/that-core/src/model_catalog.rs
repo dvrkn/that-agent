@@ -8,10 +8,10 @@ pub const MODEL_OPTIONS: &[(&str, &str)] = &[
     ("anthropic", "claude-haiku-4-5"),
     ("openai", "gpt-5.2-codex"),
     ("openai", "gpt-5.1-codex-mini"),
-    ("openrouter", "minimax/minimax-m2.5"),
-    ("openrouter", "anthropic/claude-sonnet-4.5"),
-    ("openrouter", "minimax/minimax-m2.1"),
-    ("openrouter", "qwen/qwen3-coder-next"),
+    ("openrouter", "anthropic/claude-sonnet-4-6"),
+    ("openrouter", "anthropic/claude-opus-4-6"),
+    ("openrouter", "google/gemini-3.1-pro"),
+    ("openrouter", "deepseek/deepseek-r1"),
 ];
 
 const PROVIDER_ORDER: &[&str] = &["openai", "anthropic", "openrouter"];
@@ -76,9 +76,7 @@ pub fn suggested_models(provider: &str) -> Vec<String> {
 
 pub fn provider_is_available(provider: &str) -> bool {
     match normalize_provider(provider) {
-        Some(provider) if provider == "anthropic" => {
-            has_env("CLAUDE_CODE_OAUTH_TOKEN") || has_env("ANTHROPIC_API_KEY")
-        }
+        Some(provider) if provider == "anthropic" => crate::auth::anthropic_provider_available(),
         Some(provider) if provider == "openai" => has_env("OPENAI_API_KEY"),
         Some(provider) if provider == "openrouter" => has_env("OPENROUTER_API_KEY"),
         Some(provider) => find_registered_provider(&provider)

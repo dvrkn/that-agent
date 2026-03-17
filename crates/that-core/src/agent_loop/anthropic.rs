@@ -111,7 +111,11 @@ pub(super) async fn stream_turn(
                 "Anthropic 400 — request diagnostics"
             );
         }
-        return Err(anyhow::anyhow!("Anthropic API error {status}: {resp_body}"));
+        return Err(anthropic_api_error(status, &resp_body, is_oauth));
+    }
+
+    if is_oauth {
+        return parse_oauth_response(response, tx).await;
     }
 
     // Parse SSE stream.
@@ -267,6 +271,65 @@ pub(super) async fn stream_turn(
     Ok(usage)
 }
 
+async fn parse_oauth_response(
+    response: reqwest::Response,
+    tx: mpsc::Sender<TurnEvent>,
+) -> Result<Usage> {
+    let payload: serde_json::Value = response.json().await?;
+    let mut full_text = String::new();
+    let mut usage = Usage::default();
+
+    if let Some(u) = payload.get("usage") {
+        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
+    }
+
+    if let Some(blocks) = payload["content"].as_array() {
+        for block in blocks {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => {
+                    let text = block["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        full_text.push_str(&text);
+                        let _ = tx.send(TurnEvent::TextDelta(text)).await;
+                    }
+                }
+                "thinking" => {
+                    let thinking = block["thinking"].as_str().unwrap_or("").to_string();
+                    if !thinking.is_empty() {
+                        let _ = tx.send(TurnEvent::ReasoningDelta(thinking)).await;
+                    }
+                }
+                "tool_use" => {
+                    let args_json = serde_json::to_string(
+                        block.get("input").unwrap_or(&serde_json::Value::Null),
+                    )
+                    .unwrap_or_else(|_| "{}".to_string());
+                    let _ = tx
+                        .send(TurnEvent::ToolCallComplete(ToolCall {
+                            call_id: block["id"].as_str().unwrap_or("").to_string(),
+                            name: block["name"].as_str().unwrap_or("").to_string(),
+                            args_json,
+                        }))
+                        .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = tx
+        .send(TurnEvent::TurnEnd {
+            full_text,
+            usage: usage.clone(),
+        })
+        .await;
+
+    Ok(usage)
+}
+
 /// Build the Anthropic request JSON body.
 ///
 /// OAuth tokens have limited beta support — no prompt-caching blocks, no
@@ -315,7 +378,7 @@ fn build_request(
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
-        "stream": true,
+        "stream": !is_oauth,
         "system": system_val,
         "messages": messages_json,
     });
@@ -336,6 +399,21 @@ fn build_request(
     }
 
     body.to_string()
+}
+
+fn anthropic_api_error(
+    status: reqwest::StatusCode,
+    resp_body: &str,
+    is_oauth: bool,
+) -> anyhow::Error {
+    if is_oauth && matches!(status.as_u16(), 400 | 401 | 403) {
+        return anyhow::anyhow!(
+            "Anthropic rejected the Claude Code OAuth token ({status}): {resp_body}\n\
+             Claude Code docs currently state that OAuth tokens from Free, Pro, and Max \
+             are restricted to Claude Code and Claude.ai, and third-party tools must use ANTHROPIC_API_KEY."
+        );
+    }
+    anyhow::anyhow!("Anthropic API error {status}: {resp_body}")
 }
 
 fn tool_to_anthropic(t: &ToolDef) -> serde_json::Value {
@@ -694,6 +772,8 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         // OAuth tokens don't support interleaved-thinking beta
         assert!(parsed["thinking"].is_null());
+        assert_eq!(parsed["stream"], false);
+        assert!(parsed["system"].is_string());
     }
 
     #[test]
@@ -710,5 +790,17 @@ mod tests {
         );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(parsed["thinking"].is_null());
+    }
+
+    #[test]
+    fn oauth_errors_include_api_key_guidance() {
+        let err = anthropic_api_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "{\"type\":\"error\"}",
+            true,
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OAuth token"));
+        assert!(msg.contains("ANTHROPIC_API_KEY"));
     }
 }
