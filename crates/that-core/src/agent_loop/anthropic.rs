@@ -64,12 +64,22 @@ pub(super) async fn stream_turn(
         );
     }
 
-    let response = req.body(body).send().await?;
+    let response = req.body(body.clone()).send().await?;
 
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Anthropic API error {status}: {body}"));
+        let resp_body = response.text().await.unwrap_or_default();
+        if status.as_u16() == 400 {
+            // Log the request body for debugging malformed requests.
+            let req_preview: String = body.chars().take(2000).collect();
+            tracing::error!(
+                status = %status,
+                response = %resp_body,
+                request_preview = %req_preview,
+                "Anthropic 400 — request body preview logged for debugging"
+            );
+        }
+        return Err(anyhow::anyhow!("Anthropic API error {status}: {resp_body}"));
     }
 
     // Parse SSE stream.
