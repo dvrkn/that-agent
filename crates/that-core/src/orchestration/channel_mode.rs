@@ -89,7 +89,7 @@ fn mirror_notify_event_to_registry(
     };
     let matches: Vec<_> = tasks
         .into_iter()
-        .filter(|task| event.agent_names.iter().any(|name| task.agent == *name))
+        .filter(|task| event.agent_names.contains(&task.agent))
         .collect();
     if matches.len() != 1 {
         return;

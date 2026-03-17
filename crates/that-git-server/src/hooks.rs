@@ -65,19 +65,6 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::branch_task_id;
-
-    #[test]
-    fn branch_task_id_extracts_only_task_scoped_suffix() {
-        assert_eq!(branch_task_id("task/worker/task-123"), Some("task-123"));
-        assert_eq!(branch_task_id("task/worker"), None);
-        assert_eq!(branch_task_id("main"), None);
-        assert_eq!(branch_task_id("task/worker/task-123/extra"), None);
-    }
-}
-
 /// Auto-merge a task branch into main in a bare repo.
 ///
 /// Uses `git merge-tree --write-tree` to compute the merged tree OID without a working tree,
@@ -229,5 +216,18 @@ async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, bran
             }
         }
         Err(e) => warn!("merge-tree: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_task_id;
+
+    #[test]
+    fn branch_task_id_extracts_only_task_scoped_suffix() {
+        assert_eq!(branch_task_id("task/worker/task-123"), Some("task-123"));
+        assert_eq!(branch_task_id("task/worker"), None);
+        assert_eq!(branch_task_id("main"), None);
+        assert_eq!(branch_task_id("task/worker/task-123/extra"), None);
     }
 }
