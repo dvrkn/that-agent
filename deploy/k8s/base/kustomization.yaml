@@ -18,6 +18,7 @@ resources:
   # - phoenix-deployment.yaml
   # - phoenix-service.yaml
   # Infrastructure pods — each is independent, remove lines to exclude
+  - buildkit-pvc.yaml
   - buildkit-deployment.yaml
   - buildkit-service.yaml
   - git-server-deployment.yaml

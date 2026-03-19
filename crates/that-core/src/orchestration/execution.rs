@@ -547,7 +547,7 @@ pub async fn execute_agent_run_channel(
     skill_roots: Vec<std::path::PathBuf>,
     steering: Option<SteeringQueue>,
     effective_config_path: Option<String>,
-) -> Result<(String, Vec<that_channels::ToolLogEvent>)> {
+) -> Result<(String, Vec<that_channels::ToolLogEvent>, crate::agent_loop::Usage)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
     }
@@ -867,7 +867,8 @@ pub async fn execute_agent_run_channel(
                     )
                     .await;
                 }
-                return Ok((text, tool_events));
+                let total_usage = checkpoint_usage.add(&usage);
+                return Ok((text, tool_events, total_usage));
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {

@@ -463,12 +463,13 @@ pub fn rebuild_history(entries: &[TranscriptEntry]) -> Vec<crate::agent_loop::Me
     history
 }
 
-/// Rebuild the most recent conversation history from a transcript, respecting compaction.
+/// Rebuild conversation history from a transcript, respecting compaction.
 ///
 /// - If a `Compaction` event exists, its summary is injected as a context anchor and only
 ///   messages **after** the last compaction are replayed.
-/// - History is capped to the most recent `max_pairs` user/assistant exchanges so that
-///   context restored on restart does not inflate the prompt beyond a useful size.
+/// - `max_pairs` caps the number of user/assistant exchanges restored. Pass `usize::MAX`
+///   to restore everything since the last compaction (caller should guard the no-compaction
+///   case with a reasonable fallback).
 pub fn rebuild_history_recent(
     entries: &[TranscriptEntry],
     max_pairs: usize,

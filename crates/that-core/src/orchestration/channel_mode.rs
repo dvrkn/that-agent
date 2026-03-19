@@ -2196,10 +2196,18 @@ async fn run_agent_for_sender(
                         "Detected interrupted run after restart"
                     );
                 }
-                // Restore the last 10 turns (or from the last compaction) from disk.
+                // Restore conversation from the last compaction forward (uncapped).
+                // If no compaction exists, fall back to last 50 pairs as a safety net
+                // to avoid blowing up the prompt with an unbounded transcript.
                 let hist = session_mgr
                     .read_transcript(prior_sid)
-                    .map(|entries| rebuild_history_recent(&entries, 10))
+                    .map(|entries| {
+                        let has_compaction = entries
+                            .iter()
+                            .any(|e| matches!(e.event, TranscriptEvent::Compaction { .. }));
+                        let cap = if has_compaction { usize::MAX } else { 50 };
+                        rebuild_history_recent(&entries, cap)
+                    })
                     .unwrap_or_default();
                 if !hist.is_empty() {
                     info!(
@@ -2352,6 +2360,7 @@ async fn run_agent_for_sender(
     } else {
         Some(route_target.clone())
     };
+    let sandbox = container.is_some();
     let steering_for_run = steering.filter(|_| agent.steering);
     let run_result = execute_agent_run_channel(
         &agent,
@@ -2382,7 +2391,7 @@ async fn run_agent_for_sender(
     }
 
     match run_result {
-        Ok((text, tool_events)) => {
+        Ok((text, tool_events, usage)) => {
             // If the agent called mem_compact, reset in-memory history to a compact anchor
             // so images and old turns are evicted from context — identical to /compact command.
             let compact_summary = tool_events.iter().find_map(|ev| {
@@ -2499,6 +2508,69 @@ async fn run_agent_for_sender(
             let mut map = sessions.lock().await;
             if let Some(entry) = map.get_mut(&sender_key) {
                 entry.1 = history;
+            }
+            drop(map);
+
+            // ── Auto-compaction ──────────────────────────────────────────
+            // When context usage exceeds 70% of the model's window, compact
+            // in the background (response is already delivered).
+            const AUTO_COMPACT_FRACTION: f64 = 0.70;
+            let ctx_window = crate::model_catalog::context_window(&agent.model);
+            let threshold = (ctx_window as f64 * AUTO_COMPACT_FRACTION) as u32;
+            let pct = (usage.input_tokens as f64 / ctx_window as f64 * 100.0) as u32;
+            if compact_summary.is_none() && usage.input_tokens > threshold {
+                let provider = agent.provider.clone();
+                let model = agent.model.clone();
+                let name = agent.name.clone();
+                let sandbox = sandbox;
+                let sess = sessions.clone();
+                let sk = sender_key.clone();
+                let smgr = session_mgr.clone();
+                let sid = session_id.clone();
+                let rtr = router.clone();
+                tokio::spawn(async move {
+                    let hist = {
+                        let map = sess.lock().await;
+                        match map.get(&sk) {
+                            Some(entry) => entry.1.clone(),
+                            None => return,
+                        }
+                    };
+                    let summary =
+                        build_compact_summary(&provider, &model, &name, sandbox, &hist).await;
+                    let compacted = vec![
+                        Message::user(format!("[Conversation context summary: {summary}]")),
+                        Message::assistant(
+                            "Understood, I have the context from our previous conversation."
+                                .to_string(),
+                        ),
+                    ];
+                    {
+                        let mut map = sess.lock().await;
+                        if let Some(entry) = map.get_mut(&sk) {
+                            entry.1 = compacted;
+                        }
+                    }
+                    let _ = smgr.append(
+                        &sid,
+                        &TranscriptEntry {
+                            timestamp: Utc::now(),
+                            run_id: new_run_id(),
+                            event: TranscriptEvent::Compaction {
+                                summary: summary.clone(),
+                            },
+                        },
+                    );
+                    info!(
+                        agent = %name,
+                        pct,
+                        "Auto-compacted conversation (context was {pct}% full)"
+                    );
+                    rtr.notify_all(&format!(
+                        "\u{1f5dc} Auto-compacted (context was {pct}% full)"
+                    ))
+                    .await;
+                });
             }
         }
         Err(e) => {
