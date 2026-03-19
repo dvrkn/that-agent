@@ -12,13 +12,17 @@
 pub mod agent_loop;
 pub mod agents;
 pub mod audit;
+pub mod auth;
 pub mod config;
 pub mod control;
 pub mod default_skills;
 pub mod heartbeat;
 pub mod hooks;
+pub mod model_catalog;
 pub mod observability;
 pub mod orchestration;
+pub mod plans;
+pub mod provider_registry;
 pub mod sandbox;
 pub mod session;
 pub mod skills;

@@ -239,10 +239,8 @@ mod redact_tests {
     }
 }
 
-fn tool_result_is_error(result_json: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(result_json) else {
-        return false;
-    };
+/// Check whether a pre-parsed JSON value represents a tool error.
+pub fn is_error_value(value: &serde_json::Value) -> bool {
     if value.get("error").is_some() {
         return true;
     }
@@ -366,6 +364,37 @@ pub fn channel_send_raw_tool_def() -> ToolDef {
                 }
             },
             "required": ["channel_id", "method", "payload"]
+        }),
+    }
+}
+
+/// Return the `answer` tool schema with dynamic formatting instructions.
+///
+/// The description includes the active channel's formatting guidance so the
+/// agent knows how to compose its final message. [`ChannelHook`] intercepts
+/// calls, sends a [`ChannelEvent::Done`], and returns a skip — dispatch() is
+/// never reached.
+pub fn channel_answer_tool_def(format_hint: &str) -> ToolDef {
+    let mut desc = String::from(
+        "Deliver your final answer to the human. This must be the last tool you call. \
+         Compose it as a message to a person: lead with the outcome, not the mechanics.",
+    );
+    if !format_hint.is_empty() {
+        desc.push(' ');
+        desc.push_str(format_hint);
+    }
+    ToolDef {
+        name: "answer".into(),
+        description: desc,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The final answer message to deliver to the human."
+                }
+            },
+            "required": ["message"]
         }),
     }
 }
@@ -543,14 +572,12 @@ impl LoopHook for ChannelHook {
                     return HookAction::Skip { result_json };
                 }
 
-                let message = serde_json::from_str::<serde_json::Value>(args_json)
-                    .ok()
+                let parsed = serde_json::from_str::<serde_json::Value>(args_json).ok();
+                let message = parsed
+                    .as_ref()
                     .and_then(|v| v.get("message")?.as_str().map(String::from))
                     .unwrap_or_else(|| "The agent is asking for input.".into());
-
-                let timeout = serde_json::from_str::<serde_json::Value>(args_json)
-                    .ok()
-                    .and_then(|v| v.get("timeout")?.as_u64());
+                let timeout = parsed.as_ref().and_then(|v| v.get("timeout")?.as_u64());
 
                 let result_json = match self
                     .router
@@ -584,6 +611,31 @@ impl LoopHook for ChannelHook {
                     .to_string(),
                 };
                 HookAction::Skip { result_json }
+            }
+            "answer" => {
+                let message = serde_json::from_str::<serde_json::Value>(args_json)
+                    .ok()
+                    .and_then(|v| v.get("message")?.as_str().map(String::from))
+                    .unwrap_or_default();
+
+                if !message.is_empty() {
+                    let event = ChannelEvent::Done {
+                        text: message.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cached_input_tokens: 0,
+                        cache_write_tokens: 0,
+                    };
+                    if let Some(cid) = self.channel_id.as_deref() {
+                        let _ = self.router.send_to(cid, &event, self.target.as_ref()).await;
+                    } else {
+                        self.router.broadcast(&event).await;
+                    }
+                }
+                HookAction::Finish {
+                    result_json: r#"{"delivered":true}"#.to_string(),
+                    output_text: message,
+                }
             }
             "channel_notify" => {
                 let message = serde_json::from_str::<serde_json::Value>(args_json)
@@ -758,6 +810,126 @@ impl LoopHook for ChannelHook {
                     result_json: serde_json::json!({ "ok": true }).to_string(),
                 }
             }
+            "agent_query" => {
+                let parsed = serde_json::from_str::<JsonValue>(args_json).unwrap_or_default();
+                let stream = parsed.get("stream").and_then(|v| v.as_bool()) == Some(true);
+                if !stream {
+                    return HookAction::Continue;
+                }
+
+                // Streaming agent_query is relayed through the channel without blocking
+                // on tool-event rendering. The underlying query itself remains synchronous.
+                let agent_name = parsed["name"].as_str().unwrap_or("unknown").to_string();
+                let message = parsed["message"].as_str().unwrap_or("").to_string();
+                let timeout = parsed["timeout_secs"].as_u64().unwrap_or(120);
+
+                let cluster_dir = dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".that-agent")
+                    .join("cluster");
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let gw = reg.list().ok().and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|e| e.name == agent_name)
+                        .and_then(|e| e.gateway_url.clone())
+                });
+                let Some(gateway_url) = gw else {
+                    return HookAction::Skip {
+                        result_json: serde_json::json!({
+                            "error": format!("agent '{}' not found or has no gateway", agent_name)
+                        })
+                        .to_string(),
+                    };
+                };
+
+                let router = Arc::clone(&self.router);
+                let channel_id = self.channel_id.clone();
+                let target = self.target.clone();
+                let show_work = self.show_work.load(Ordering::Relaxed) && !self.suppress_streaming;
+
+                // Spawn the streaming relay so work visibility continues while the
+                // synchronous query is in-flight.
+                let agent_name_ret = agent_name.clone();
+                tokio::spawn(async move {
+                    let (event_tx, mut event_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<crate::agents::AgentStreamEvent>();
+
+                    let relay_router = Arc::clone(&router);
+                    let relay_cid = channel_id.clone();
+                    let relay_target = target.clone();
+                    let relay = tokio::spawn(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            if !show_work {
+                                continue;
+                            }
+                            let ch_event = match &event {
+                                crate::agents::AgentStreamEvent::ToolCall { name, args } => {
+                                    ChannelEvent::ToolCall {
+                                        call_id: String::new(),
+                                        name: name.clone(),
+                                        args: args.clone(),
+                                    }
+                                }
+                                crate::agents::AgentStreamEvent::ToolResult { name, result } => {
+                                    ChannelEvent::ToolResult {
+                                        call_id: String::new(),
+                                        name: name.clone(),
+                                        result: result.clone(),
+                                    }
+                                }
+                                crate::agents::AgentStreamEvent::Done { .. } => continue,
+                                crate::agents::AgentStreamEvent::Error { message } => {
+                                    ChannelEvent::Notify(format!("⚠ Sub-agent error: {message}"))
+                                }
+                            };
+                            if let Some(cid) = relay_cid.as_deref() {
+                                let _ = relay_router
+                                    .send_to(cid, &ch_event, relay_target.as_ref())
+                                    .await;
+                            } else {
+                                relay_router.broadcast(&ch_event).await;
+                            }
+                        }
+                    });
+
+                    let result = crate::agents::query_agent_stream(
+                        &gateway_url,
+                        &agent_name,
+                        &message,
+                        timeout,
+                        event_tx,
+                    )
+                    .await;
+                    let _ = relay.await;
+
+                    // Deliver result as notification to channel + heartbeat queue.
+                    let notification = match &result {
+                        Ok(text) => {
+                            let preview: String = text.chars().take(500).collect();
+                            format!("[agent_query/{agent_name}] completed: {preview}")
+                        }
+                        Err(e) => format!("[agent_query/{agent_name}] failed: {e:#}"),
+                    };
+                    if let Some(cid) = channel_id.as_deref() {
+                        let _ = router
+                            .send_to(cid, &ChannelEvent::Notify(notification), target.as_ref())
+                            .await;
+                    } else {
+                        router.notify_all(&notification).await;
+                    }
+                });
+
+                // Return immediately — query runs in background.
+                HookAction::Skip {
+                    result_json: serde_json::json!({
+                        "agent": agent_name_ret,
+                        "status": "dispatched",
+                        "note": "Query running in background. Result will arrive as a notification."
+                    })
+                    .to_string(),
+                }
+            }
             _ => {
                 // Surface all tool invocations to the active channel when not
                 // in a silent/background run and work visibility is enabled.
@@ -781,7 +953,9 @@ impl LoopHook for ChannelHook {
 
     async fn on_tool_result(&self, name: &str, call_id: &str, result_json: &str) {
         let result: String = result_json.chars().take(2000).collect();
-        let is_error = tool_result_is_error(result_json);
+        // Parse once for both error detection and logging.
+        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok();
+        let is_error = parsed.as_ref().map(is_error_value).unwrap_or(false);
         debug!(tool = %name, is_error, result_chars = result_json.chars().count(), " ← {name}: {}", if is_error { "ERR" } else { "ok" });
 
         if let Some(tx) = &self.log_tx {
@@ -833,4 +1007,30 @@ fn mime_type_hint(filename: &str) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::hook::LoopHook;
+
+    #[tokio::test]
+    async fn answer_tool_finishes_the_run() {
+        let (router, _rx) = that_channels::ChannelRouter::new(vec![], 0);
+        let router = Arc::new(router);
+        let hook = ChannelHook::silent(router, None);
+        let action = hook
+            .on_tool_call("answer", "call-1", r#"{"message":"done"}"#)
+            .await;
+        match action {
+            HookAction::Finish {
+                result_json,
+                output_text,
+            } => {
+                assert_eq!(result_json, r#"{"delivered":true}"#);
+                assert_eq!(output_text, "done");
+            }
+            other => panic!("expected terminal answer hook action, got {other:?}"),
+        }
+    }
 }

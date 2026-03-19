@@ -1215,6 +1215,8 @@ pub async fn execute_agent_run_tui(
     tracing::Span::current().record("gen_ai.prompt", preview.as_str());
     let task_for_model = append_memory_bootstrap_reminder(task, history.len());
     let mut attempt = 0u32;
+    let mut checkpoint_messages: Option<Vec<Message>> = None;
+    let mut checkpoint_usage = crate::agent_loop::Usage::default();
     loop {
         if attempt > 0 {
             let delay_ms = RETRY_BASE_DELAY_MS << (attempt - 1).min(4);
@@ -1258,11 +1260,17 @@ pub async fn execute_agent_run_tui(
                 router: None,
                 state_dir: dirs::home_dir()
                     .map(|h| h.join(".that-agent").join("agents").join(&agent.name)),
+                agent_name: agent.name.clone(),
+                disable_memory: false,
             },
             images: vec![],
             steering: steering.clone(),
         };
-        let result = agent_loop::run(&config, &task_for_model, &hook).await;
+        let result = if let Some(messages) = checkpoint_messages.clone() {
+            agent_loop::resume_with_checkpoint(&config, messages, &hook).await
+        } else {
+            agent_loop::run_with_checkpoint(&config, &task_for_model, &hook).await
+        };
 
         match result {
             Ok((text, usage)) => {
@@ -1273,6 +1281,7 @@ pub async fn execute_agent_run_tui(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -1288,17 +1297,21 @@ pub async fn execute_agent_run_tui(
                 });
                 return Ok(text);
             }
-            Err(e) => {
-                if is_retryable_error(&e) && attempt < MAX_NETWORK_RETRIES {
+            Err(interrupted) => {
+                if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
                     attempt += 1;
+                    checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
+                    checkpoint_messages = Some(interrupted.messages);
                     continue;
                 }
                 tracing::Span::current().record("otel.status_code", "error");
-                tracing::Span::current()
-                    .record("otel.status_description", format!("{e:#}").as_str());
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("{:#}", interrupted.error).as_str(),
+                );
                 crate::observability::flush_tracing();
-                let _ = tui_tx.send(tui::TuiEvent::Error(format!("{e:#}")));
-                return Err(e);
+                let _ = tui_tx.send(tui::TuiEvent::Error(format!("{:#}", interrupted.error)));
+                return Err(interrupted.error);
             }
         }
     }

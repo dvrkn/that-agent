@@ -190,6 +190,8 @@ pub struct InboundMessage {
     pub session_hint: Option<String>,
     /// Callback URL for async response delivery (set by inbound webhook callers).
     pub callback_url: Option<String>,
+    /// When true, queued for next heartbeat tick instead of immediate agent run.
+    pub deferred: bool,
     /// Attachments received alongside the message (images, audio, etc.).
     pub attachments: Vec<InboundAttachment>,
     /// Platform-specific metadata (e.g. callback query info from Telegram).
@@ -215,6 +217,10 @@ pub struct OutboundTarget {
     /// Correlation identifier for request/response pairing (e.g. HTTP request ID).
     /// Distinct from `thread_id` which represents actual platform threads.
     pub request_id: Option<String>,
+    /// When true the response is a background status update (e.g. heartbeat).
+    /// Adapters should merge it into a live status display rather than sending
+    /// a new standalone message.
+    pub status_update: bool,
 }
 
 /// Abstraction over a communication channel (TUI, Telegram, Discord, WhatsApp, …).

@@ -568,7 +568,7 @@ gather_config() {
   fi
 
   # LLM key — auto-detect provider from key prefix, or pick up from env
-  LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}"
+  LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${CLAUDE_CODE_AUTH_TOKEN:-${CLAUDE_CODE_AUTH:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}}}"
   if [[ -n "${LLM_API_KEY}" ]]; then
     ok "Detected API key from environment."
   else
@@ -789,6 +789,9 @@ data:
   THAT_CLUSTER_TAILSCALE: "${INSTALL_TAILSCALE_OPERATOR}"
   THAT_CLUSTER_TAILNET_NAME: "${TS_TAILNET_NAME:-}"
   THAT_CLUSTER_K9S: "${INSTALL_K9S}"
+  THAT_AGENT_PARENT: ""
+  THAT_AGENT_ROLE: ""
+  THAT_BUILDKIT_GC_KEEPSTORAGE_MB: "4096"
 EOF
 
   # secret.yaml

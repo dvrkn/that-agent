@@ -8,8 +8,10 @@ use tracing::{debug, error, info, warn};
 use crate::agent_loop::{Message, SteeringQueue};
 use crate::config::{AgentDef, WorkspaceConfig};
 use crate::heartbeat;
+use crate::model_catalog::{available_providers, normalize_provider, suggested_models};
 use crate::session::{
-    new_run_id, rebuild_history_recent, RunStatus, SessionManager, TranscriptEntry, TranscriptEvent,
+    new_run_id, rebuild_history_recent, ChannelPreferences, RunStatus, SessionManager,
+    TranscriptEntry, TranscriptEvent,
 };
 
 use super::config::*;
@@ -40,6 +42,8 @@ pub(super) struct HotState {
 type ChannelSessions = Arc<
     tokio::sync::Mutex<std::collections::HashMap<String, (String, Vec<Message>, Arc<AtomicBool>)>>,
 >;
+type ChannelModelPrefs =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, ChannelPreferences>>>;
 type PluginTaskEntry = (
     String,
     Option<String>,
@@ -58,6 +62,182 @@ pub(super) struct ActiveSenderRun {
 }
 pub(super) type ActiveSenderRuns =
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, ActiveSenderRun>>>;
+
+fn is_zero_git_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.chars().all(|ch| ch == '0')
+}
+
+fn heartbeat_sender_key(
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
+) -> String {
+    format!(
+        "heartbeat:{}:{}:{}",
+        channel_id,
+        conversation_id.unwrap_or_default(),
+        sender_id
+    )
+}
+
+fn should_queue_notification(text: &str, metadata: Option<&serde_json::Value>) -> bool {
+    if let Some(meta) = metadata {
+        if let Some(state) = meta.get("task_state").and_then(|value| value.as_str()) {
+            return matches!(
+                state,
+                "completed" | "failed" | "canceled" | "input_required"
+            );
+        }
+        if let Some(event) = meta.get("event").and_then(|value| value.as_str()) {
+            return matches!(event, "merge_conflict");
+        }
+    }
+
+    let text = text.trim();
+    !(text.starts_with('[')
+        && text.contains(" turn ")
+        && text.contains('/')
+        && text.ends_with(')')
+        && text.contains(" ("))
+}
+
+fn mirror_notify_event_to_scratchpad(meta: &serde_json::Value) {
+    let cluster_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".that-agent")
+        .join("cluster");
+    let task_reg = crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+    mirror_notify_event_to_registry(&task_reg, meta);
+}
+
+fn mirror_notify_event_to_registry(
+    task_reg: &crate::agents::AgentTaskRegistry,
+    meta: &serde_json::Value,
+) {
+    let Some(event) = notify_scratchpad_event(meta) else {
+        return;
+    };
+    if let Some(task_id) = event.task_id.as_deref() {
+        let _ =
+            task_reg.scratchpad_append_kind(task_id, event.actor, &event.note, Some(event.kind));
+        return;
+    }
+    let Ok(tasks) = task_reg.list_active() else {
+        return;
+    };
+    let matches: Vec<_> = tasks
+        .into_iter()
+        .filter(|task| event.agent_names.contains(&task.agent))
+        .collect();
+    if matches.len() != 1 {
+        return;
+    }
+    let _ =
+        task_reg.scratchpad_append_kind(&matches[0].id, event.actor, &event.note, Some(event.kind));
+}
+
+struct NotifyScratchpadEvent<'a> {
+    kind: &'static str,
+    actor: &'a str,
+    note: String,
+    agent_names: Vec<String>,
+    task_id: Option<String>,
+}
+
+fn branch_task_id(branch: &str) -> Option<&str> {
+    let mut parts = branch.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("task"), Some(_worker), Some(task_id), None) if !task_id.trim().is_empty() => {
+            Some(task_id)
+        }
+        _ => None,
+    }
+}
+
+fn notify_scratchpad_event(meta: &serde_json::Value) -> Option<NotifyScratchpadEvent<'_>> {
+    let event = meta.get("event").and_then(|v| v.as_str())?;
+    let kind = match event {
+        "push"
+            if meta
+                .get("commit")
+                .and_then(|v| v.as_str())
+                .is_some_and(is_zero_git_oid) =>
+        {
+            "branch_deleted"
+        }
+        "push" => "commit",
+        "auto_merge" => "auto_merge",
+        "merge_conflict" => "merge_conflict",
+        _ => return None,
+    };
+    let actor = meta
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("git-server");
+    let repo = meta
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .unwrap_or("workspace");
+    let branch = meta.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+    let commit = meta.get("commit").and_then(|v| v.as_str()).unwrap_or("");
+    let note = match event {
+        "push" if is_zero_git_oid(commit) => {
+            format!("Git branch deletion visible to parent: repo={repo}, branch={branch}")
+        }
+        "push" => {
+            format!("Git activity visible to parent: repo={repo}, branch={branch}, commit={commit}")
+        }
+        "auto_merge" => {
+            format!(
+                "Git auto-merge visible to parent: repo={repo}, branch={branch}, commit={commit}"
+            )
+        }
+        "merge_conflict" => {
+            let files = meta
+                .get("conflicting_files")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!(
+                "Git merge conflict visible to parent: repo={repo}, branch={branch}, files={files}"
+            )
+        }
+        _ => unreachable!(),
+    };
+    let mut agent_names = Vec::new();
+    if let Some(name) = actor.strip_prefix("git-server/") {
+        agent_names.push(name.to_string());
+    }
+    if let Some(name) = branch
+        .strip_prefix("task/")
+        .and_then(|rest| rest.split('/').next())
+    {
+        agent_names.push(name.to_string());
+    }
+    agent_names.sort();
+    agent_names.dedup();
+    if agent_names.is_empty() {
+        return None;
+    }
+    let task_id = meta
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .filter(|task_id| !task_id.trim().is_empty())
+        .map(|task_id| task_id.to_string())
+        .or_else(|| branch_task_id(branch).map(|task_id| task_id.to_string()));
+    Some(NotifyScratchpadEvent {
+        kind,
+        actor,
+        note,
+        agent_names,
+        task_id,
+    })
+}
 
 /// Remove a sender lock entry when no other tasks still reference it.
 ///
@@ -83,17 +263,445 @@ pub async fn evict_sender_lock_if_idle(
     }
 }
 
-/// Abort and clear the currently active run for a sender key, if any.
-pub(super) async fn stop_active_sender_run(
+async fn stop_matching_runs<F>(active_runs: &ActiveSenderRuns, matches: F) -> usize
+where
+    F: Fn(&str) -> bool,
+{
+    let mut runs = active_runs.lock().await;
+    let keys: Vec<String> = runs.keys().filter(|key| matches(key)).cloned().collect();
+    for key in &keys {
+        if let Some(run) = runs.remove(key) {
+            run.abort.abort();
+        }
+    }
+    keys.len()
+}
+
+pub(super) async fn stop_run_scope(
     active_runs: &ActiveSenderRuns,
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
+    sender_key: &str,
+) -> usize {
+    let scoped_heartbeat_key = heartbeat_sender_key(channel_id, conversation_id, sender_id);
+    stop_matching_runs(active_runs, |key| {
+        key == sender_key || key == scoped_heartbeat_key || key == "heartbeat:system"
+    })
+    .await
+}
+
+async fn cleanup_after_stop(notification_queue: &Arc<tokio::sync::Mutex<Vec<String>>>) {
+    notification_queue.lock().await.clear();
+}
+
+pub(super) async fn stop_run_scope_and_cleanup(
+    active_runs: &ActiveSenderRuns,
+    notification_queue: &Arc<tokio::sync::Mutex<Vec<String>>>,
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
     sender_key: &str,
 ) -> bool {
-    let active = active_runs.lock().await.remove(sender_key);
-    if let Some(run) = active {
-        run.abort.abort();
-        true
+    let stopped = stop_run_scope(
+        active_runs,
+        channel_id,
+        conversation_id,
+        sender_id,
+        sender_key,
+    )
+    .await;
+    if stopped > 0 {
+        cleanup_after_stop(notification_queue).await;
+        // Clean up ephemeral child Jobs in K8s (fire-and-forget)
+        if crate::agents::is_k8s_mode() {
+            tokio::spawn(async {
+                if let Err(e) = crate::agents::cleanup_ephemeral_children().await {
+                    tracing::warn!("failed to clean up child jobs on /stop: {e}");
+                }
+            });
+        }
+    }
+    stopped > 0
+}
+
+fn apply_channel_preferences(agent: &AgentDef, prefs: &ChannelPreferences) -> AgentDef {
+    let mut effective = agent.clone();
+    if let (Some(provider), Some(model)) = (prefs.provider.as_deref(), prefs.model.as_deref()) {
+        effective.provider = provider.to_string();
+        effective.model = model.to_string();
+    }
+    effective
+}
+
+fn active_provider<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.provider.as_deref().unwrap_or(&agent.provider)
+}
+
+fn active_model<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.model.as_deref().unwrap_or(&agent.model)
+}
+
+fn channel_model_status(agent: &AgentDef, prefs: &ChannelPreferences) -> String {
+    let source = if prefs.is_default() {
+        "agent default"
     } else {
-        false
+        "channel override"
+    };
+    format!(
+        "Current model for this conversation: {} / {} ({source}).",
+        active_provider(agent, prefs),
+        active_model(agent, prefs),
+    )
+}
+
+fn channel_config_slug(sender_key: &str) -> String {
+    let slug: String = sender_key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if slug.is_empty() {
+        "default".into()
+    } else {
+        slug
+    }
+}
+
+fn effective_channel_config_host_path(
+    agent_name: &str,
+    sender_key: &str,
+) -> Option<std::path::PathBuf> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    dirs::home_dir().map(|home| {
+        home.join(".that-agent")
+            .join("state")
+            .join("channel-configs")
+            .join(agent_name)
+            .join(file_name)
+    })
+}
+
+fn effective_channel_config_visible_path(
+    agent_name: &str,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    if sandbox {
+        Some(format!(
+            "/home/agent/.that-agent/state/channel-configs/{agent_name}/{file_name}"
+        ))
+    } else {
+        effective_channel_config_host_path(agent_name, sender_key)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+}
+
+fn persist_effective_channel_config(
+    agent: &AgentDef,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let path = effective_channel_config_host_path(&agent.name, sender_key)?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let text = toml::to_string_pretty(agent).ok()?;
+    std::fs::write(&path, text).ok()?;
+    effective_channel_config_visible_path(&agent.name, sender_key, sandbox)
+}
+
+fn remove_effective_channel_config(agent_name: &str, sender_key: &str) {
+    if let Some(path) = effective_channel_config_host_path(agent_name, sender_key) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn provider_menu_text(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[String],
+) -> String {
+    let mut text = format!(
+        "{}\n\nAvailable providers:\n",
+        channel_model_status(agent, prefs)
+    );
+    for provider in providers {
+        let marker = if provider == active_provider(agent, prefs) {
+            "✓"
+        } else {
+            "•"
+        };
+        text.push_str(&format!("{marker} {provider}\n"));
+    }
+    text.push_str("\nUse /models <provider> to see suggested models, or /models reset to go back to the agent default.");
+    text
+}
+
+fn model_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, provider: &str) -> String {
+    let mut text = format!(
+        "{}\n\nSuggested models for {provider}:\n",
+        channel_model_status(agent, prefs)
+    );
+    for model in suggested_models(provider) {
+        let marker =
+            if provider == active_provider(agent, prefs) && model == active_model(agent, prefs) {
+                "✓"
+            } else {
+                "•"
+            };
+        text.push_str(&format!("{marker} {model}\n"));
+    }
+    text.push_str("\nUse /models <provider> <model> to set a custom model.");
+    text
+}
+
+fn provider_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[String],
+) -> Option<that_channels::ReplyMarkup> {
+    if providers.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in providers.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|provider| that_channels::InlineButton {
+                text: if provider == active_provider(agent, prefs) {
+                    format!("✓ {provider}")
+                } else {
+                    provider.to_string()
+                },
+                callback_data: format!("/models {provider}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    if !prefs.is_default() {
+        rows.push(vec![that_channels::InlineButton {
+            text: "Reset to default".into(),
+            callback_data: "/models reset".into(),
+        }]);
+    }
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+fn model_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    provider: &str,
+) -> Option<that_channels::ReplyMarkup> {
+    let models = suggested_models(provider);
+    if models.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in models.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|model| that_channels::InlineButton {
+                text: if provider == active_provider(agent, prefs)
+                    && model == active_model(agent, prefs)
+                {
+                    format!("✓ {model}")
+                } else {
+                    model.to_string()
+                },
+                callback_data: format!("/models {provider} {model}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    rows.push(vec![
+        that_channels::InlineButton {
+            text: "✏️ Custom".into(),
+            callback_data: format!("/models {provider} __custom__"),
+        },
+        that_channels::InlineButton {
+            text: "Back".into(),
+            callback_data: "/models".into(),
+        },
+    ]);
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+async fn send_channel_menu(
+    router: &Arc<that_channels::ChannelRouter>,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    text: String,
+    reply_markup: Option<that_channels::ReplyMarkup>,
+) {
+    if let Some(reply_markup) = reply_markup {
+        let msg = that_channels::OutboundMessage {
+            text: text.clone(),
+            parse_mode: Some(that_channels::ParseMode::Plain),
+            reply_markup: Some(reply_markup),
+            reply_to_message_id: target.reply_to_message_id.clone(),
+        };
+        if router
+            .send_message(channel_id, msg, Some(target))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    router.notify_channel(channel_id, &text, Some(target)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_models_command(
+    router: &Arc<that_channels::ChannelRouter>,
+    session_mgr: &Arc<SessionManager>,
+    model_prefs: &ChannelModelPrefs,
+    sender_key: &str,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    agent: &AgentDef,
+    current_prefs: &ChannelPreferences,
+    sandbox: bool,
+    args: &str,
+) {
+    let providers = available_providers();
+    if providers.is_empty() {
+        router
+            .notify_channel(
+                channel_id,
+                "No provider API keys are configured. Set an API key first, then try /models again.",
+                Some(target),
+            )
+            .await;
+        return;
+    }
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => {
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                provider_menu_text(agent, current_prefs, &providers),
+                provider_menu_markup(agent, current_prefs, &providers),
+            )
+            .await;
+        }
+        ["reset"] => {
+            let prefs = ChannelPreferences::default();
+            {
+                let mut map = model_prefs.lock().await;
+                map.remove(sender_key);
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            remove_effective_channel_config(&agent.name, sender_key);
+            let message = format!(
+                "Model reset. This conversation now uses the agent default: {} / {}.",
+                agent.provider, agent.model
+            );
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
+        [provider] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.iter().any(|candidate| candidate == &provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                model_menu_text(agent, current_prefs, &provider),
+                model_menu_markup(agent, current_prefs, &provider),
+            )
+            .await;
+        }
+        [provider, model_parts @ ..] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.iter().any(|candidate| candidate == &provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            let model = model_parts.join(" ").trim().to_string();
+            if model.is_empty() {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Model name is required. Use /models <provider> first to see suggestions.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            }
+            if model == "__custom__" {
+                let msg = that_channels::OutboundMessage {
+                    text: format!("Type the model ID for {provider}:"),
+                    parse_mode: Some(that_channels::ParseMode::Plain),
+                    reply_markup: Some(that_channels::ReplyMarkup::ForceReply {
+                        input_field_placeholder: Some(format!("/models {provider} model-id")),
+                    }),
+                    reply_to_message_id: target.reply_to_message_id.clone(),
+                };
+                let _ = router.send_message(channel_id, msg, Some(target)).await;
+                return;
+            }
+            let prefs = ChannelPreferences {
+                provider: Some(provider.to_string()),
+                model: Some(model.clone()),
+            };
+            {
+                let mut map = model_prefs.lock().await;
+                map.insert(sender_key.to_string(), prefs.clone());
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            let effective_agent = apply_channel_preferences(agent, &prefs);
+            let message = if let Some(path) =
+                persist_effective_channel_config(&effective_agent, sender_key, sandbox)
+            {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it. Effective runtime config: {path}"
+                )
+            } else {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it."
+                )
+            };
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
     }
 }
 
@@ -169,10 +777,15 @@ pub async fn run_listen(
 
     // Per-sender state: key = "channel_id:sender_id" → (session_id, history, show_work).
     let sessions: ChannelSessions = Arc::new(Mutex::new(HashMap::new()));
+    let model_prefs: ChannelModelPrefs =
+        Arc::new(Mutex::new(session_mgr.load_channel_preferences()));
     let channel_index_lock = Arc::new(Mutex::new(()));
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
     // Queued __notify__ messages drained each heartbeat tick.
     let notification_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Queued deferred inbound messages drained each heartbeat tick.
+    let inbound_queue: Arc<Mutex<Vec<that_channels::InboundMessage>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     eprintln!(
         "[that] Listening on channels: {} (primary: {})\n[that] Agent: {} — Ctrl+C to stop.",
@@ -194,6 +807,7 @@ pub async fn run_listen(
     router.initialize_deferred().await;
 
     // If unbootstrapped, greet on all channels so the user knows to start the ceremony.
+    // Otherwise, send a restart marker so the user knows we're back.
     if ws_files.needs_bootstrap() {
         let name = &agent.name;
         router
@@ -202,6 +816,62 @@ pub async fn run_listen(
                  Send me a message to start our bootstrap ceremony and figure out who I am."
             ))
             .await;
+    } else {
+        // Build restart summary from last session + active tasks.
+        let mut summary = format!("🔄 {} restarted — back online.", agent.name);
+
+        // Find the last human message from a real channel session.
+        // Skip heartbeat/system sender keys — only look at channel:conversation:user sessions.
+        let channel_sessions = session_mgr.load_channel_sessions();
+        let human_session = channel_sessions
+            .iter()
+            .find(|(key, _)| !key.starts_with("heartbeat:") && !key.starts_with("inbound:"));
+        if let Some((_sender, sid)) = human_session {
+            if let Ok(entries) = session_mgr.read_transcript(sid) {
+                // Walk backwards to find a genuine human message (not system-injected).
+                let last_human_msg = entries.iter().rev().find_map(|e| match &e.event {
+                    crate::session::TranscriptEvent::UserMessage { content }
+                        if !content.starts_with("Heartbeat")
+                            && !content.starts_with('[')
+                            && !content.starts_with('#') =>
+                    {
+                        let preview: String = content.chars().take(100).collect();
+                        Some(preview)
+                    }
+                    _ => None,
+                });
+                if let Some(msg) = last_human_msg {
+                    summary.push_str(&format!("\nLast request: \"{msg}\""));
+                }
+            }
+        }
+
+        // Active task summary from task registry.
+        let task_reg = crate::agents::AgentTaskRegistry::new(state_dir.join("agent_tasks.json"));
+        if let Ok(tasks) = task_reg.list_active() {
+            if !tasks.is_empty() {
+                summary.push_str(&format!("\nActive tasks: {}", tasks.len()));
+                for t in tasks.iter().take(5) {
+                    let pad_hint = if t.scratchpad.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{} scratchpad notes]", t.scratchpad.len())
+                    };
+                    summary.push_str(&format!(
+                        "\n• {} ({}){}: {}",
+                        t.agent,
+                        t.state,
+                        pad_hint,
+                        t.messages
+                            .last()
+                            .map(|m| m.text.chars().take(80).collect::<String>())
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+        }
+
+        router.notify_all(&summary).await;
     }
 
     // ── Boot-time registry hydration ──────────────────────────────────────
@@ -313,6 +983,10 @@ pub async fn run_listen(
         });
     }
 
+    let sender_locks = SenderRunLocks::default();
+    let active_sender_runs: ActiveSenderRuns = Arc::default();
+    let sender_run_seq = Arc::new(AtomicU64::new(1));
+
     // ── Background heartbeat monitor ────────────────────────────────────────
     // Polls Heartbeat.md every heartbeat_interval seconds. Due entries are
     // dispatched as autonomous agent runs. Global items use "heartbeat:system";
@@ -329,6 +1003,9 @@ pub async fn run_listen(
         let channel_registry_hb = Arc::clone(&channel_registry);
         let route_registry_hb = Arc::clone(&route_registry);
         let notification_queue_hb = Arc::clone(&notification_queue);
+        let inbound_queue_hb = Arc::clone(&inbound_queue);
+        let active_runs_hb = Arc::clone(&active_sender_runs);
+        let sender_run_seq_hb = Arc::clone(&sender_run_seq);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -434,6 +1111,22 @@ pub async fn run_listen(
                     heartbeat::Priority::Unknown(_) => 4,
                 });
 
+                // Suppress non-urgent heartbeat entries when a task run is active.
+                // This prevents the agent from doing unrelated background work (status
+                // reports, daily checks) while focused on a parent-dispatched task.
+                let has_active_task_run = {
+                    let runs = active_runs_hb.lock().await;
+                    runs.keys().any(|k| !k.starts_with("heartbeat:"))
+                };
+                if has_active_task_run && !due_indices.is_empty() {
+                    due_indices.retain(|&i| {
+                        matches!(
+                            entries[i].priority,
+                            heartbeat::Priority::Urgent | heartbeat::Priority::High
+                        )
+                    });
+                }
+
                 let plugin_tasks = {
                     let _runtime_guard = plugin_runtime_lock_hb.lock().await;
                     let plugin_registry = that_plugins::PluginRegistry::load(&current_agent.name);
@@ -498,11 +1191,14 @@ pub async fn run_listen(
 
                 let pending_notifs: Vec<String> =
                     std::mem::take(&mut *notification_queue_hb.lock().await);
+                let pending_inbound: Vec<that_channels::InboundMessage> =
+                    std::mem::take(&mut *inbound_queue_hb.lock().await);
 
                 if due_indices.is_empty()
                     && unscoped_plugin_tasks.is_empty()
                     && scoped_plugin_tasks.is_empty()
                     && pending_notifs.is_empty()
+                    && pending_inbound.is_empty()
                 {
                     continue;
                 }
@@ -537,8 +1233,12 @@ pub async fn run_listen(
                 if !due_refs.is_empty()
                     || !unscoped_plugin_tasks.is_empty()
                     || !pending_notifs.is_empty()
+                    || !pending_inbound.is_empty()
                 {
-                    let mut task = if due_refs.is_empty() && pending_notifs.is_empty() {
+                    let mut task = if due_refs.is_empty()
+                        && pending_notifs.is_empty()
+                        && pending_inbound.is_empty()
+                    {
                         String::from(
                             "Heartbeat check-in. Process the following plugin-triggered items:\n\n",
                         )
@@ -554,6 +1254,92 @@ pub async fn run_listen(
                             task.push_str(&format!("- {n}\n"));
                         }
                     }
+                    if !pending_inbound.is_empty() {
+                        task.push_str("\n\n## Pending inbound requests:\n");
+                        for m in &pending_inbound {
+                            let cb = m.callback_url.as_deref().unwrap_or("no callback");
+                            // Extract task_id from callback URL for scratchpad access.
+                            let task_id_hint = m
+                                .callback_url
+                                .as_deref()
+                                .and_then(|u| u.split("task_id=").nth(1))
+                                .map(|t| t.split('&').next().unwrap_or(t))
+                                .unwrap_or("");
+                            let attach_count = m.attachments.len();
+                            let tid_line = if task_id_hint.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (task_id: {task_id_hint})")
+                            };
+                            task.push_str(&format!(
+                                "### [sender: {}]{tid_line} (callback: {}) [{} attachments]\n{}\n\n",
+                                m.sender_id, cb, attach_count, m.text
+                            ));
+                        }
+
+                        const INBOUND_BATCH_WARN_THRESHOLD: usize = 10;
+                        if pending_inbound.len() > INBOUND_BATCH_WARN_THRESHOLD {
+                            let mut sender_counts: std::collections::HashMap<&str, usize> =
+                                std::collections::HashMap::new();
+                            for m in &pending_inbound {
+                                *sender_counts.entry(&m.sender_id).or_default() += 1;
+                            }
+                            let breakdown: String = sender_counts
+                                .iter()
+                                .map(|(s, c)| format!("{s}: {c}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            warn!(
+                                count = pending_inbound.len(),
+                                breakdown = %breakdown,
+                                "High inbound batch volume"
+                            );
+                            let warning_msg = format!(
+                                "Budget warning: {} inbound requests batched this tick. Breakdown: {}",
+                                pending_inbound.len(),
+                                breakdown
+                            );
+                            let _ = router_hb.notify_all(&warning_msg).await;
+                            task.push_str(&format!(
+                                "\n**BUDGET WARNING**: {} inbound requests batched this tick.\n\
+                                 Sender breakdown: {}\n\
+                                 Investigate which deployed service is over-requesting. Use `channel_notify` \
+                                 to alert the operator and propose corrective action before proceeding.\n",
+                                pending_inbound.len(),
+                                breakdown
+                            ));
+                        }
+                    }
+                    // Inject active task summary so the agent has operative context.
+                    let cluster_dir_tasks = dirs::home_dir()
+                        .unwrap_or_default()
+                        .join(".that-agent")
+                        .join("cluster");
+                    let task_reg = crate::agents::AgentTaskRegistry::new(
+                        cluster_dir_tasks.join("agent_tasks.json"),
+                    );
+                    if let Ok(active) = task_reg.list_active() {
+                        if !active.is_empty() {
+                            task.push_str(&format!("\n\n## Active tasks ({}):\n", active.len()));
+                            for t in active.iter().take(10) {
+                                let short_id: String = t.id.chars().take(8).collect();
+                                task.push_str(&format!(
+                                    "• {} [{}] ({})",
+                                    t.agent, short_id, t.state
+                                ));
+                                if let Some(last_msg) = t.messages.last() {
+                                    let preview: String = last_msg.text.chars().take(80).collect();
+                                    task.push_str(&format!(" — {preview}"));
+                                }
+                                task.push('\n');
+                                for h in &t.scratchpad_header {
+                                    let note: String = h.note.chars().take(120).collect();
+                                    task.push_str(&format!("  [{}] {note}\n", h.kind));
+                                }
+                            }
+                        }
+                    }
+
                     if due_refs.is_empty() && !unscoped_plugin_tasks.is_empty() {
                         task.push_str(plugin_only_notify_guidance);
                     }
@@ -565,7 +1351,7 @@ pub async fn run_listen(
                         "Dispatching global heartbeat run"
                     );
 
-                    run_agent_for_sender(
+                    run_agent_for_sender_tracked(
                         task,
                         "heartbeat".to_string(),
                         "system".to_string(),
@@ -580,6 +1366,8 @@ pub async fn run_listen(
                         container_hb.clone(),
                         preamble_hb.clone(),
                         Arc::clone(&router_hb),
+                        Arc::clone(&active_runs_hb),
+                        Arc::clone(&sender_run_seq_hb),
                         vec![],
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
@@ -621,7 +1409,7 @@ pub async fn run_listen(
                         "Dispatching scoped heartbeat run"
                     );
 
-                    run_agent_for_sender(
+                    run_agent_for_sender_tracked(
                         task,
                         route_channel_id,
                         sender_for_route,
@@ -636,6 +1424,8 @@ pub async fn run_listen(
                         container_hb.clone(),
                         preamble_hb.clone(),
                         Arc::clone(&router_hb),
+                        Arc::clone(&active_runs_hb),
+                        Arc::clone(&sender_run_seq_hb),
                         vec![],
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
@@ -646,13 +1436,31 @@ pub async fn run_listen(
                     )
                     .await;
                 }
+
+                // After processing, immediately re-check for inbound messages that
+                // arrived while we were busy. Avoids waiting a full tick interval for
+                // queued tasks dispatched by the parent during a long run.
+                let leftover_inbound = {
+                    let q = inbound_queue_hb.lock().await;
+                    !q.is_empty()
+                };
+                let leftover_notifs = {
+                    let q = notification_queue_hb.lock().await;
+                    !q.is_empty()
+                };
+                if leftover_inbound || leftover_notifs {
+                    debug!(
+                        "Heartbeat re-check: {} inbound, {} notifications queued during run",
+                        if leftover_inbound { "yes" } else { "no" },
+                        if leftover_notifs { "yes" } else { "no" }
+                    );
+                    // Reset the ticker so the next iteration starts immediately.
+                    ticker.reset();
+                }
             }
         });
     }
 
-    let sender_locks = SenderRunLocks::default();
-    let active_sender_runs: ActiveSenderRuns = Arc::default();
-    let sender_run_seq = Arc::new(AtomicU64::new(1));
     // ── SIGTERM / SIGINT handler ───────────────────────────────────────────
     // Without this, K8s pod termination (SIGTERM) or OOM-adjacent kills leave
     // no trace in logs, making crashes look "silent".
@@ -674,6 +1482,7 @@ pub async fn run_listen(
             let container = container.clone();
             let session_mgr = Arc::clone(&session_mgr);
             let sessions = Arc::clone(&sessions);
+            let model_prefs = Arc::clone(&model_prefs);
             let channel_index_lock = Arc::clone(&channel_index_lock);
             let plugin_runtime_lock = Arc::clone(&plugin_runtime_lock);
             let hot = Arc::clone(&hot);
@@ -684,14 +1493,56 @@ pub async fn run_listen(
             let channel_registry = Arc::clone(&channel_registry);
             let route_registry = Arc::clone(&route_registry);
             let notification_queue = Arc::clone(&notification_queue);
+            let inbound_queue = Arc::clone(&inbound_queue);
 
             async move {
-                if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
-                    let mut q = notification_queue.lock().await;
-                    if q.len() < 500 {
-                        q.push(msg.text);
+                if msg.deferred {
+                    let mut q = inbound_queue.lock().await;
+                    if q.len() < 100 {
+                        q.push(msg);
                     } else {
-                        warn!("notification_queue full (500), dropping notification");
+                        warn!("inbound_queue full (100), dropping deferred message from {}", msg.sender_id);
+                    }
+                    return;
+                }
+                if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
+                    // Relay to channel immediately for user visibility.
+                    router.notify_all(&msg.text).await;
+                    // Update task registry if this is a task_update notification.
+                    if let Some(meta) = &msg.metadata {
+                        if let (Some(task_id), Some(task_state)) = (
+                            meta.get("task_id").and_then(|v| v.as_str()),
+                            meta.get("task_state").and_then(|v| v.as_str()),
+                        ) {
+                            let cluster_dir = dirs::home_dir()
+                                .unwrap_or_default()
+                                .join(".that-agent")
+                                .join("cluster");
+                            let task_reg = crate::agents::AgentTaskRegistry::new(
+                                cluster_dir.join("agent_tasks.json"),
+                            );
+                            let Ok(state) = task_state.parse::<crate::agents::AgentTaskState>()
+                            else {
+                                warn!("Unknown task state: {task_state}");
+                                return;
+                            };
+                            let full_msg = meta
+                                .get("full_message")
+                                .and_then(|v| v.as_str());
+                            let actor = meta.get("agent").and_then(|v| v.as_str());
+                            let _ = task_reg.update_state(task_id, state, actor, full_msg);
+                        } else {
+                            mirror_notify_event_to_scratchpad(meta);
+                        }
+                    }
+                    // Queue only actionable notifications for parent LLM context at next heartbeat turn.
+                    if should_queue_notification(&msg.text, msg.metadata.as_ref()) {
+                        let mut q = notification_queue.lock().await;
+                        if q.len() < 500 {
+                            q.push(msg.text);
+                        } else {
+                            warn!("notification_queue full (500), dropping notification");
+                        }
                     }
                     return;
                 }
@@ -713,8 +1564,17 @@ pub async fn run_listen(
                         session_id: None,
                         reply_to_message_id: msg.message_id.clone(),
                         request_id: msg.session_hint.clone(),
+                        status_update: false,
                     };
-                    let stopped = stop_active_sender_run(&active_sender_runs, &sender_key).await;
+                    let stopped = stop_run_scope_and_cleanup(
+                        &active_sender_runs,
+                        &notification_queue,
+                        &msg.channel_id,
+                        msg.conversation_id.as_deref(),
+                        &msg.sender_id,
+                        &sender_key,
+                    )
+                    .await;
                     let text = if stopped {
                         "Stopped current run."
                     } else {
@@ -739,8 +1599,14 @@ pub async fn run_listen(
                         if let Some(mid) = msg.message_id.clone() {
                             let r = Arc::clone(&router);
                             let ch = msg.channel_id.clone();
-                            let chat = msg.conversation_id.clone().unwrap_or_default();
-                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}").await });
+                            let chat = msg
+                                .conversation_id
+                                .clone()
+                                .unwrap_or_else(|| msg.sender_id.clone());
+                            tokio::spawn(async move {
+                                r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}")
+                                    .await
+                            });
                         }
                         return;
                     }
@@ -765,6 +1631,7 @@ pub async fn run_listen(
                         session_id: None,
                         reply_to_message_id: msg.message_id.clone(),
                         request_id: msg.session_hint.clone(),
+                        status_update: false,
                     };
 
                     // Snapshot the current hot state for this message.
@@ -786,6 +1653,21 @@ pub async fn run_listen(
                             state.plugin_activations.clone(),
                             state.agent.clone(),
                             state.skill_roots.clone(),
+                        )
+                    };
+                    let channel_prefs = {
+                        let prefs = model_prefs.lock().await;
+                        prefs.get(&sender_key).cloned().unwrap_or_default()
+                    };
+                    let effective_agent = apply_channel_preferences(&agent, &channel_prefs);
+                    let effective_config_path = if channel_prefs.is_default() {
+                        remove_effective_channel_config(&agent.name, &sender_key);
+                        None
+                    } else {
+                        persist_effective_channel_config(
+                            &effective_agent,
+                            &sender_key,
+                            container.is_some(),
                         )
                     };
 
@@ -839,6 +1721,22 @@ pub async fn run_listen(
                                     .await;
                                 return;
                             }
+                            "models" => {
+                                handle_models_command(
+                                    &router,
+                                    &session_mgr,
+                                    &model_prefs,
+                                    &sender_key,
+                                    &msg.channel_id,
+                                    &outbound_target,
+                                    &agent,
+                                    &channel_prefs,
+                                    container.is_some(),
+                                    &args,
+                                )
+                                .await;
+                                return;
+                            }
                             "clear" => {
                                 // Create a fresh session so the old transcript is abandoned.
                                 let new_sid = session_mgr
@@ -887,9 +1785,9 @@ pub async fn run_listen(
                                         drop(map);
                                         // LLM-generated summary of the conversation.
                                         let summary = build_compact_summary(
-                                            &agent.provider,
-                                            &agent.model,
-                                            &agent.name,
+                                            &effective_agent.provider,
+                                            &effective_agent.model,
+                                            &effective_agent.name,
                                             container.is_some(),
                                             &hist_clone,
                                         )
@@ -942,8 +1840,15 @@ pub async fn run_listen(
                                 return;
                             }
                             "stop" => {
-                                let stopped =
-                                    stop_active_sender_run(&active_sender_runs, &sender_key).await;
+                                let stopped = stop_run_scope_and_cleanup(
+                                    &active_sender_runs,
+                                    &notification_queue,
+                                    &msg.channel_id,
+                                    msg.conversation_id.as_deref(),
+                                    &msg.sender_id,
+                                    &sender_key,
+                                )
+                                .await;
                                 let text = if stopped {
                                     "Stopped current run."
                                 } else {
@@ -985,7 +1890,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -997,6 +1902,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1019,7 +1925,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -1031,6 +1937,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1060,7 +1967,7 @@ pub async fn run_listen(
                         sessions,
                         std::sync::Arc::clone(&channel_index_lock),
                         session_mgr,
-                        agent,
+                        effective_agent,
                         container,
                         preamble,
                         router,
@@ -1072,6 +1979,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry)),
                         skill_roots,
                         msg.callback_url,
+                        effective_config_path,
                     )
                     .await;
                 })
@@ -1118,6 +2026,7 @@ async fn run_agent_for_sender_tracked(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
 ) {
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
@@ -1147,6 +2056,7 @@ async fn run_agent_for_sender_tracked(
             route_registry,
             skill_roots,
             callback_url,
+            effective_config_path,
             Some(steering_for_task),
         )
         .await;
@@ -1199,6 +2109,7 @@ async fn run_agent_for_sender(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
     steering: Option<SteeringQueue>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
@@ -1225,6 +2136,7 @@ async fn run_agent_for_sender(
         session_id: None,
         reply_to_message_id: message_id.clone(),
         request_id: session_hint.clone(),
+        status_update: is_internal_source,
     };
 
     // Immediately acknowledge the message so the user knows the agent is working.
@@ -1460,6 +2372,7 @@ async fn run_agent_for_sender(
         route_registry,
         skill_roots,
         steering_for_run,
+        effective_config_path,
     )
     .await;
 
@@ -1549,10 +2462,16 @@ async fn run_agent_for_sender(
             history.push(Message::assistant(&text));
             if let Some(url) = callback_url {
                 let t = text.clone();
+                let agent = sender_id.clone();
                 tokio::spawn(async move {
                     let _ = reqwest::Client::new()
                         .post(&url)
-                        .json(&serde_json::json!({ "text": t }))
+                        .json(&serde_json::json!({
+                            "text": t,
+                            "state": "completed",
+                            "message": t,
+                            "agent": agent,
+                        }))
                         .timeout(std::time::Duration::from_secs(10))
                         .send()
                         .await;
@@ -1596,5 +2515,235 @@ async fn run_agent_for_sender(
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        channel_config_slug, effective_channel_config_visible_path, heartbeat_sender_key,
+        mirror_notify_event_to_registry, notify_scratchpad_event, should_queue_notification,
+        stop_run_scope,
+    };
+    use crate::agents::AgentTaskRegistry;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn channel_config_slug_normalizes_sender_keys() {
+        assert_eq!(channel_config_slug("telegram:123/abc"), "telegram_123_abc");
+    }
+
+    #[test]
+    fn sandbox_effective_config_path_uses_state_dir() {
+        let path = effective_channel_config_visible_path("demo", "telegram:123", true).unwrap();
+        assert_eq!(
+            path,
+            "/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"
+        );
+    }
+
+    #[test]
+    fn notify_scratchpad_event_extracts_worker_names() {
+        let meta = serde_json::json!({
+            "event": "push",
+            "agent": "git-server/reviewer",
+            "repo": "workspace",
+            "branch": "task/developer",
+            "commit": "abcdef12",
+        });
+        let event = notify_scratchpad_event(&meta).unwrap();
+        assert_eq!(event.kind, "commit");
+        assert_eq!(event.actor, "git-server/reviewer");
+        assert!(event.note.contains("abcdef12"));
+        assert_eq!(
+            event.agent_names,
+            vec!["developer".to_string(), "reviewer".to_string()]
+        );
+        assert!(event.task_id.is_none());
+    }
+
+    #[test]
+    fn notify_scratchpad_event_marks_branch_deletion() {
+        let meta = serde_json::json!({
+            "event": "push",
+            "agent": "git-server/developer",
+            "repo": "workspace",
+            "branch": "task/developer/task-1",
+            "commit": "0000000000000000000000000000000000000000",
+        });
+        let event = notify_scratchpad_event(&meta).unwrap();
+        assert_eq!(event.kind, "branch_deleted");
+        assert!(event.note.contains("branch deletion"));
+    }
+
+    #[test]
+    fn should_queue_notification_filters_progress_and_git_push_noise() {
+        assert!(!should_queue_notification(
+            "[backend-dev] turn 17/300 (64s)",
+            None
+        ));
+        assert!(!should_queue_notification(
+            "[git-server/orchestrator] git push: orchestrator pushed task/backend-dev to workspace (830fd6dc)",
+            Some(&serde_json::json!({
+                "event": "push",
+                "commit": "830fd6dc"
+            }))
+        ));
+        assert!(should_queue_notification(
+            "[task:abc/backend-dev] completed: shipped",
+            Some(&serde_json::json!({
+                "task_id": "abc",
+                "task_state": "completed"
+            }))
+        ));
+        assert!(should_queue_notification(
+            "[git-server] merge conflict",
+            Some(&serde_json::json!({
+                "event": "merge_conflict"
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_run_scope_aborts_matching_heartbeat_run() {
+        let active_runs: super::ActiveSenderRuns =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let sender_key = "telegram:309052368:309052368".to_string();
+        let hb_key = heartbeat_sender_key("telegram", Some("309052368"), "309052368");
+        let direct = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let heartbeat = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        {
+            let mut runs = active_runs.lock().await;
+            runs.insert(
+                sender_key.clone(),
+                super::ActiveSenderRun {
+                    run_id: 1,
+                    abort: direct.abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+            runs.insert(
+                hb_key.clone(),
+                super::ActiveSenderRun {
+                    run_id: 2,
+                    abort: heartbeat.abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+            runs.insert(
+                "heartbeat:system".to_string(),
+                super::ActiveSenderRun {
+                    run_id: 3,
+                    abort: tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    })
+                    .abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+        }
+
+        let stopped = stop_run_scope(
+            &active_runs,
+            "telegram",
+            Some("309052368"),
+            "309052368",
+            &sender_key,
+        )
+        .await;
+        assert_eq!(stopped, 3);
+        assert!(active_runs.lock().await.is_empty());
+        direct.abort();
+        heartbeat.abort();
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_updates_matching_task_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "implement", "parent").unwrap();
+        let task_b = reg.create("reviewer", "review", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": "task/developer",
+                "commit": "abc12345",
+            }),
+        );
+
+        let task_a = reg.get(&task_a.id).unwrap().unwrap();
+        let task_b = reg.get(&task_b.id).unwrap().unwrap();
+        assert_eq!(task_a.scratchpad.len(), 1);
+        assert_eq!(task_a.scratchpad[0].kind, "commit");
+        assert!(task_a.scratchpad[0].note.contains("abc12345"));
+        assert!(task_b.scratchpad.is_empty());
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_skips_ambiguous_same_agent_match() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "task a", "parent").unwrap();
+        let task_b = reg.create("developer", "task b", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": "task/developer",
+                "commit": "abc12345",
+            }),
+        );
+
+        assert!(reg.get(&task_a.id).unwrap().unwrap().scratchpad.is_empty());
+        assert!(reg.get(&task_b.id).unwrap().unwrap().scratchpad.is_empty());
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_prefers_explicit_task_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "task a", "parent").unwrap();
+        let task_b = reg.create("developer", "task b", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": format!("task/developer/{}", task_b.id),
+                "task_id": task_b.id,
+                "commit": "abc12345",
+            }),
+        );
+
+        assert!(reg.get(&task_a.id).unwrap().unwrap().scratchpad.is_empty());
+        let task_b = reg.get(&task_b.id).unwrap().unwrap();
+        assert_eq!(task_b.scratchpad.len(), 1);
+        assert_eq!(task_b.scratchpad[0].kind, "commit");
     }
 }
