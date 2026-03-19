@@ -2522,7 +2522,6 @@ async fn run_agent_for_sender(
                 let provider = agent.provider.clone();
                 let model = agent.model.clone();
                 let name = agent.name.clone();
-                let sandbox = sandbox;
                 let sess = sessions.clone();
                 let sk = sender_key.clone();
                 let smgr = session_mgr.clone();
