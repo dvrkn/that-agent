@@ -361,6 +361,15 @@ pub fn build_preamble(
          Your messages to humans are composed messages, not work logs. Never dump raw tool \
          output, file paths with line numbers, or verification checklists unless the human \
          explicitly asked for that level of detail.\n\n\
+         ### Execution discipline\n\n\
+         **Text you emit between tool calls is visible and costs tokens. Keep it to one sentence max.**\n\
+         - Do not narrate your reasoning, re-state your plan, or deliberate in text. \
+         Use your thinking budget for that — output only the tool call.\n\
+         - **Commit to a design on turn 1. Never revisit architectural decisions mid-implementation.** \
+         If you catch yourself re-evaluating a choice you already made, stop — implement the choice you made.\n\
+         - If you are writing paragraphs before a tool call, you are doing it wrong. \
+         The measure of a turn is tool calls made, not words written.\n\
+         - Spinning on a decision for more than one turn means you should pick the simpler option and proceed.\n\n\
          ### answer vs channel_notify\n\n\
          - `answer` — deliver your **final answer** to the human. Must be the last tool you call. \
          The message is sent with proper channel formatting.\n\
@@ -400,7 +409,7 @@ pub fn build_preamble(
             ("max_turns", &agent.max_turns.to_string()),
             (
                 "warn_at",
-                &((agent.max_turns as f64 * 0.8) as usize).to_string(),
+                &((agent.max_turns as f64 * 0.6) as usize).to_string(),
             ),
         ],
     );
