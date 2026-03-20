@@ -17,10 +17,6 @@ Single consolidated Rust crate (`that-agent`) + standalone `that-git-server`. Se
 - **No dead code.** If it's unused, delete it. No `#[allow(dead_code)]` on production paths.
 - **No over-abstraction.** Three similar lines are better than a premature helper function.
 
-### Naming & Legacy
-
-- The old project name was **"anvil"**. All references have been migrated to `that-tools` / `that-agent`. Never reintroduce "anvil" in code, comments, or docs.
-
 ### Agent / Skill Prompts
 
 - NLP-driven, generic language only. No real file paths, component names, or model IDs as examples.
