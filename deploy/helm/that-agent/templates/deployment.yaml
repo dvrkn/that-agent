@@ -1,3 +1,4 @@
+{{- if ne .Values.agent.role "ephemeral" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,7 +35,11 @@ spec:
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
+          {{- if eq .Values.agent.role "root" }}
           command: ["/bin/bash", "/opt/that/bootstrap/entrypoint.sh"]
+          {{- else }}
+          command: ["that", "--agent", {{ .Values.agent.name | quote }}, "run", "listen", "--no-sandbox"]
+          {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -69,9 +74,11 @@ spec:
               mountPath: /home/agent/.that-agent
             - name: workspace
               mountPath: /workspace
+          {{- if eq .Values.agent.role "root" }}
             - name: entrypoint-script
               mountPath: /opt/that/bootstrap
               readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
           readinessProbe:
@@ -112,16 +119,20 @@ spec:
             claimName: {{ .Values.agent.storage.existingClaim | default (printf "%s-home" (include "that-agent.fullname" .)) }}
         - name: workspace
           emptyDir: {}
+      {{- if eq .Values.agent.role "root" }}
         - name: entrypoint-script
           configMap:
             name: {{ include "that-agent.fullname" . }}-entrypoint
             defaultMode: 0755
+      {{- end }}
       {{- if .Values.dind.enabled }}
         - name: docker-socket
           emptyDir: {}
         - name: docker-data
           emptyDir: {}
       {{- end }}
+{{- end }}
+{{- if eq .Values.agent.role "root" }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -132,3 +143,4 @@ metadata:
 data:
   entrypoint.sh: |
 {{ .Files.Get "files/entrypoint.sh" | indent 4 }}
+{{- end }}

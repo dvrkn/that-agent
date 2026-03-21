@@ -31,6 +31,21 @@ app.kubernetes.io/version: {{ include "that-agent.imageTag" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: that-agent
 that-agent/managed: "true"
+that-agent/name: {{ .Values.agent.name | quote }}
+that-agent/type: {{ if eq .Values.agent.role "ephemeral" }}ephemeral{{ else }}persistent{{ end }}
+{{- if .Values.agent.parent }}
+that-agent/parent: {{ .Values.agent.parent | quote }}
+{{- end }}
+{{- if .Values.agent.agentRole }}
+that-agent/role: {{ .Values.agent.agentRole | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+Is this a root agent (full stack with infra services)?
+*/}}
+{{- define "that-agent.isRoot" -}}
+{{- eq .Values.agent.role "root" }}
 {{- end }}
 
 {{/*

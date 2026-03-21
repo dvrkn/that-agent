@@ -40,8 +40,16 @@ data:
   {{- end }}
   THAT_GIT_WEBHOOK_URL: ""
   THAT_GIT_AUTO_MERGE: "false"
-  THAT_AGENT_PARENT: ""
-  THAT_AGENT_ROLE: ""
+  THAT_AGENT_PARENT: {{ .Values.agent.parent | quote }}
+  THAT_AGENT_ROLE: {{ .Values.agent.agentRole | quote }}
+  {{- if ne .Values.agent.role "root" }}
+  THAT_PARENT_GATEWAY_URL: {{ .Values.agent.parentGatewayUrl | default "" | quote }}
+  THAT_PARENT_GATEWAY_TOKEN: {{ .Values.agent.parentGatewayToken | default "" | quote }}
+  {{- end }}
+  {{- if and (eq .Values.agent.role "ephemeral") .Values.agent.job.workspace }}
+  GIT_REPO_URL: {{ .Values.agent.job.gitRepoUrl | quote }}
+  GIT_BRANCH: {{ .Values.agent.job.gitBranch | quote }}
+  {{- end }}
   RUST_LOG: "info"
   PHOENIX_TRACING: {{ .Values.observability.phoenixTracing | toString | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otelEndpoint | quote }}

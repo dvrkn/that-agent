@@ -1,6 +1,8 @@
 # -- Agent configuration
 agent:
   name: default
+  # Role: root (full stack), child (persistent worker), ephemeral (one-shot Job)
+  role: root
   image:
     repository: ghcr.io/that-labs/that-agent
     tag: ""  # defaults to Chart.AppVersion (e.g. v0.3.0)
@@ -17,10 +19,25 @@ agent:
   model: claude-sonnet-4-6
   maxTurns: 75
   bootstrapPrompt: ""
+  # Parent agent name (set automatically for children)
+  parent: ""
+  # Agent role label (explorer, developer, reviewer, etc.)
+  agentRole: ""
+  # Parent gateway (set automatically for children)
+  parentGatewayUrl: ""
+  parentGatewayToken: ""
   storage:
     size: 20Gi
     storageClassName: ""
     existingClaim: ""  # use a pre-existing PVC (e.g. from Kustomize migration)
+  # Ephemeral job settings (only used when role=ephemeral)
+  job:
+    task: ""           # task text (mounted as /etc/agent-task/task.txt)
+    workspace: false   # clone workspace repo
+    gitRepoUrl: ""     # workspace git URL
+    gitBranch: ""      # task branch name
+    ttlSeconds: 300    # cleanup after completion
+    backoffLimit: 0
 
 # -- Access level: cluster-admin | namespace-admin | readonly
 accessLevel: namespace-admin

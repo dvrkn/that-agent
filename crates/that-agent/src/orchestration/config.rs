@@ -79,7 +79,9 @@ pub fn invalidate_pinned_context() {
 }
 
 /// Get or refresh the pinned context string for injection into system reminders.
-pub fn get_or_refresh_pinned_context(config: &crate::tools::config::MemoryConfig) -> Option<String> {
+pub fn get_or_refresh_pinned_context(
+    config: &crate::tools::config::MemoryConfig,
+) -> Option<String> {
     if let Ok(cache) = PINNED_CONTEXT_CACHE.lock() {
         if let Some(ref cached) = *cache {
             return if cached.is_empty() {

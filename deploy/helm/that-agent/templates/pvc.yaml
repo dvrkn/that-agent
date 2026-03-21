@@ -1,4 +1,4 @@
-{{- if not .Values.agent.storage.existingClaim }}
+{{- if and (ne .Values.agent.role "ephemeral") (not .Values.agent.storage.existingClaim) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
