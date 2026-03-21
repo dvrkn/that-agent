@@ -1,4 +1,22 @@
 {{- if .Values.buildkit.enabled }}
+{{- if .Values.registry.insecure }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "that-agent.fullname" . }}-buildkit-config
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkit
+data:
+  buildkitd.toml: |
+    [registry."{{ .Values.registry.host }}"]
+      http = true
+    {{- if and .Values.registry.pushEndpoint (ne .Values.registry.pushEndpoint .Values.registry.host) }}
+    [registry."{{ .Values.registry.pushEndpoint }}"]
+      http = true
+    {{- end }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +52,10 @@ spec:
             - "{{ div (mul (.Values.buildkit.storage.size | trimSuffix "Gi" | int) 1024) 1 }}"
             - --addr
             - tcp://0.0.0.0:1234
+          {{- if .Values.registry.insecure }}
+            - --config
+            - /etc/buildkit/buildkitd.toml
+          {{- end }}
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
@@ -46,6 +68,11 @@ spec:
           volumeMounts:
             - name: buildkit-cache
               mountPath: /home/user/.local/share/buildkit
+          {{- if .Values.registry.insecure }}
+            - name: buildkit-config
+              mountPath: /etc/buildkit
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.buildkit.resources | nindent 12 }}
           readinessProbe:
@@ -63,4 +90,9 @@ spec:
         - name: buildkit-cache
           persistentVolumeClaim:
             claimName: {{ .Values.buildkit.storage.existingClaim | default (printf "%s-buildkit" (include "that-agent.fullname" .)) }}
+      {{- if .Values.registry.insecure }}
+        - name: buildkit-config
+          configMap:
+            name: {{ include "that-agent.fullname" . }}-buildkit-config
+      {{- end }}
 {{- end }}

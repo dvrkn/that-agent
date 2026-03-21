@@ -72,6 +72,12 @@ gitServer:
       cpu: "200m"
       memory: "128Mi"
 
+# -- Container registry for agent-built images
+registry:
+  host: "registry.local:5000"
+  pushEndpoint: ""  # override if push address differs from pull
+  insecure: true    # use HTTP instead of HTTPS
+
 # -- BuildKit
 buildkit:
   enabled: true

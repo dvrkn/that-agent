@@ -32,6 +32,10 @@ secrets:
 gitServer:
   enabled: true
 
+registry:
+  host: "myregistry.localhost:5000"
+  insecure: true
+
 buildkit:
   enabled: true
   storage:
