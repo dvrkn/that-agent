@@ -24,12 +24,14 @@ rules:
     resources:
       - deployments
       - replicasets
+      - statefulsets
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Batch resources — ephemeral agent Jobs
+  # Batch resources — ephemeral agent Jobs + scheduled work
   - apiGroups: ["batch"]
     resources:
       - jobs
-    verbs: ["get", "list", "watch", "create", "delete"]
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Networking — manage ingresses for exposing agent services
   - apiGroups: ["networking.k8s.io"]
     resources:
@@ -43,8 +45,5 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
       - roles
-    verbs: ["get", "list"]
-    resourceNames:
-      - {{ include "that-agent.fullname" . }}-child-readonly
-      - {{ include "that-agent.fullname" . }}-child-sandbox
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
 {{- end }}
