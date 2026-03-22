@@ -188,6 +188,14 @@ impl AgentDef {
             }
         }
 
+        if !file_has("preamble") {
+            if let Ok(v) = std::env::var("THAT_AGENT_BOOTSTRAP_PROMPT") {
+                if !v.is_empty() {
+                    self.preamble = Some(v);
+                }
+            }
+        }
+
         // ── Hard overrides: env vars always win (set by parent/orchestrator) ──
         if let Ok(v) = std::env::var("THAT_AGENT_PARENT") {
             if !v.is_empty() {

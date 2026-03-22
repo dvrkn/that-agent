@@ -927,6 +927,14 @@ fn child_helm_sets(
         "agent.storage.size=1Gi".to_string(),
     ];
 
+    // Pass the role description as bootstrap prompt so the child knows its purpose
+    if !agent_role.is_empty() {
+        sets.push(format!(
+            "agent.bootstrapPrompt={}",
+            agent_role.replace(',', "\\,")
+        ));
+    }
+
     // Forward the image so children use the same version as parent
     if let Ok(image) = std::env::var("THAT_AGENT_IMAGE") {
         if let Some((repo, tag)) = image.rsplit_once(':') {
