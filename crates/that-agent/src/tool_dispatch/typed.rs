@@ -1271,7 +1271,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "role": { "type": "string", "description": "Optional role description" },
                     "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
                     "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
-                    "env": { "type": "object", "description": "Optional env var overrides for the child (e.g. {\"TELEGRAM_BOT_TOKEN\": \"bot123:...\"} to give it its own channel)" }
+                    "env": { "type": "object", "description": "Optional env var overrides for the child (e.g. {\"TELEGRAM_BOT_TOKEN\": \"bot123:...\"} to give it its own channel)" },
+                    "identity_configmap": { "type": "string", "description": "K8s ConfigMap name containing config.toml + identity files (Soul.md, Agents.md, etc.) to seed into the child agent" }
                 },
                 "required": ["name"]
             }),
@@ -1301,7 +1302,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                             "agents": { "type": "string", "description": "Agents.md content — operating instructions, tool discipline" },
                             "context": { "type": "string", "description": "Domain context for the task: links to scrape, citations, background research gathered by the parent" }
                         }
-                    }
+                    },
+                    "identity_configmap": { "type": "string", "description": "K8s ConfigMap name containing config.toml + identity files to seed into the ephemeral agent" }
                 },
                 "required": ["name", "task"]
             }),
@@ -2613,6 +2615,7 @@ async fn dispatch_inner(
                 gateway_port: Option<u16>,
                 model: Option<String>,
                 env: Option<std::collections::HashMap<String, String>>,
+                identity_configmap: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -2625,6 +2628,7 @@ async fn dispatch_inner(
                     args.model.as_deref(),
                     args.env.as_ref(),
                     Path::new(&config.memory.db_path),
+                    args.identity_configmap.as_deref(),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
@@ -2663,6 +2667,7 @@ async fn dispatch_inner(
                 workspace: Option<bool>,
                 timeout_secs: Option<u64>,
                 bootstrap: Option<crate::workspace::GoldBootstrap>,
+                identity_configmap: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -2678,6 +2683,7 @@ async fn dispatch_inner(
                     args.workspace.unwrap_or(false),
                     args.timeout_secs.unwrap_or(1800),
                     args.bootstrap.as_ref(),
+                    args.identity_configmap.as_deref(),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))

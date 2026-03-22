@@ -213,6 +213,42 @@ impl WorkspaceFiles {
     }
 }
 
+/// Seed identity files from the ConfigMap mount (`/etc/agent-identity/`) into the
+/// agent home directory on PVC. Called at boot before workspace file loading.
+///
+/// - `config.toml` is always overwritten (parent is authoritative for config).
+/// - All other files are seeded only if absent (the agent evolves them over time).
+pub fn seed_from_identity_mount(agent_name: &str) {
+    let src = std::path::Path::new("/etc/agent-identity");
+    if !src.exists() {
+        return;
+    }
+    let Some(dest) = agent_dir_local(agent_name) else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        tracing::warn!(error = %e, "seed_identity: failed to create agent dir");
+        return;
+    }
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "seed_identity: failed to read mount");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let target = dest.join(&name);
+        let overwrite = name == "config.toml";
+        if overwrite || !target.exists() {
+            if let Err(e) = std::fs::copy(entry.path(), &target) {
+                tracing::warn!(file = ?name, error = %e, "seed_identity: failed to copy");
+            }
+        }
+    }
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 /// Load all workspace files from the local filesystem for the given agent.

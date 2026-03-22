@@ -56,10 +56,20 @@ spec:
             - name: task
               mountPath: /etc/agent-task
               readOnly: true
+          {{- if .Values.agent.identityConfigMap }}
+            - name: identity
+              mountPath: /etc/agent-identity
+              readOnly: true
+          {{- end }}
       volumes:
         - name: workspace
           emptyDir: {}
         - name: task
           configMap:
             name: {{ include "that-agent.fullname" . }}-task
+      {{- if .Values.agent.identityConfigMap }}
+        - name: identity
+          configMap:
+            name: {{ .Values.agent.identityConfigMap }}
+      {{- end }}
 {{- end }}

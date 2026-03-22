@@ -105,6 +105,7 @@ pub async fn run_task(
     let found_skills = discover_skills_with_registry(agent, &plugin_registry);
     info!(count = found_skills.len(), "Discovered skills");
 
+    crate::workspace::seed_from_identity_mount(&agent.name);
     if let Some(bootstrap) = crate::workspace::GoldBootstrap::from_env() {
         bootstrap.apply_local(&agent.name);
     }
@@ -241,6 +242,7 @@ pub async fn run_chat(
     let found_skills = discover_skills_with_registry(agent, &plugin_registry);
     info!(count = found_skills.len(), "Discovered skills");
 
+    crate::workspace::seed_from_identity_mount(&agent.name);
     if let Some(bootstrap) = crate::workspace::GoldBootstrap::from_env() {
         bootstrap.apply_local(&agent.name);
     }

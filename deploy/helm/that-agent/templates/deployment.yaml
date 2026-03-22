@@ -79,6 +79,11 @@ spec:
               mountPath: /opt/that/bootstrap
               readOnly: true
           {{- end }}
+          {{- if .Values.agent.identityConfigMap }}
+            - name: identity
+              mountPath: /etc/agent-identity
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
           readinessProbe:
@@ -124,6 +129,11 @@ spec:
           configMap:
             name: {{ include "that-agent.fullname" . }}-entrypoint
             defaultMode: 0755
+      {{- end }}
+      {{- if .Values.agent.identityConfigMap }}
+        - name: identity
+          configMap:
+            name: {{ .Values.agent.identityConfigMap }}
       {{- end }}
       {{- if .Values.dind.enabled }}
         - name: docker-socket

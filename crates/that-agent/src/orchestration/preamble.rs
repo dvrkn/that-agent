@@ -645,7 +645,12 @@ pub fn build_preamble(
              - Call multiple `agent_run` in one turn — they run **in parallel** automatically\n\
              - Use for: analysis, research, coding tasks, batch processing, reviews\n\n\
              **Persistent agents** (`spawn_agent`) — long-running services:\n\
-             - `spawn_agent(name, role)` → creates a Deployment + Service\n\
+             - `spawn_agent(name, role, identity_configmap?)` → creates a Deployment + Service\n\
+             - To give the child a rich identity, write files to a workspace directory, create a ConfigMap \
+             from them (`kubectl create configmap <name>-identity --from-file=<dir>`), then pass \
+             `identity_configmap` to `spawn_agent`. Include `config.toml` (model, parent, role) plus \
+             identity files like `Soul.md` and `Agents.md`. Persistent agents seed these on first boot \
+             then evolve them freely.\n\
              - `agent_query(name, message)` → synchronous request/response via gateway\n\
              - `agent_query(name, message, stream=true)` → streaming: sub-agent tool calls shown on channel in real-time\n\
              - `agent_task(action=query_async, name, message)` → fire-and-forget: returns immediately, result arrives as notification\n\

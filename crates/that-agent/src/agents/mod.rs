@@ -888,6 +888,16 @@ async fn helm_uninstall(release: &str, ns: &str) -> Result<()> {
         release,
         String::from_utf8_lossy(&output.stderr)
     );
+    // Clean up identity ConfigMap (created by parent, not managed by Helm)
+    let _ = tokio::process::Command::new("kubectl")
+        .args([
+            "delete", "configmap",
+            &format!("{release}-identity"),
+            "--namespace", ns,
+            "--ignore-not-found",
+        ])
+        .output()
+        .await;
     Ok(())
 }
 
@@ -898,6 +908,7 @@ fn child_helm_sets(
     agent_role: &str,
     parent: &str,
     model: &str,
+    identity_cm: Option<&str>,
 ) -> Vec<String> {
     let parent_gw = crate::orchestration::support::resolve_gateway_url();
     let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
@@ -927,8 +938,11 @@ fn child_helm_sets(
         "agent.storage.size=1Gi".to_string(),
     ];
 
-    // Pass the role description as bootstrap prompt so the child knows its purpose
-    if !agent_role.is_empty() {
+    // Identity ConfigMap: mount config.toml + identity files into child
+    if let Some(cm) = identity_cm {
+        sets.push(format!("agent.identityConfigMap={cm}"));
+    } else if !agent_role.is_empty() {
+        // Fallback: pass role as bootstrap prompt when no identity ConfigMap
         sets.push(format!(
             "agent.bootstrapPrompt={}",
             agent_role.replace(',', "\\,")
@@ -958,6 +972,7 @@ pub async fn spawn_persistent_agent_k8s(
     model: Option<&str>,
     _env_overrides: Option<&std::collections::HashMap<String, String>>,
     db_path: &std::path::Path,
+    identity_configmap: Option<&str>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -968,7 +983,7 @@ pub async fn spawn_persistent_agent_k8s(
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
-    let sets = child_helm_sets(name, "child", role.unwrap_or(""), parent, &model_str);
+    let sets = child_helm_sets(name, "child", role.unwrap_or(""), parent, &model_str, identity_configmap);
     helm_install(&release_name, &ns, &sets).await?;
 
     let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");
@@ -1008,6 +1023,7 @@ pub async fn run_ephemeral_agent_k8s(
     workspace: bool,
     timeout_secs: u64,
     _bootstrap: Option<&crate::workspace::GoldBootstrap>,
+    identity_configmap: Option<&str>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -1036,7 +1052,7 @@ pub async fn run_ephemeral_agent_k8s(
         }
     }
 
-    let mut sets = child_helm_sets(name, "ephemeral", role.unwrap_or(""), parent, &model_str);
+    let mut sets = child_helm_sets(name, "ephemeral", role.unwrap_or(""), parent, &model_str, identity_configmap);
 
     // Ephemeral-specific settings
     // Escape commas/special chars in task text by using a file-based approach

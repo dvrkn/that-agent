@@ -19,6 +19,9 @@ agent:
   model: claude-sonnet-4-6
   maxTurns: 75
   bootstrapPrompt: ""
+  # Identity ConfigMap name — holds config.toml + identity files (Soul.md, Agents.md, etc.)
+  # Created by parent agent before spawning; mounted at /etc/agent-identity
+  identityConfigMap: ""
   # Parent agent name (set automatically for children)
   parent: ""
   # Agent role label (explorer, developer, reviewer, etc.)
