@@ -37,7 +37,7 @@ that-agent/type: {{ if eq .Values.agent.role "ephemeral" }}ephemeral{{ else }}pe
 that-agent/parent: {{ .Values.agent.parent | quote }}
 {{- end }}
 {{- if .Values.agent.agentRole }}
-that-agent/role: {{ .Values.agent.agentRole | quote }}
+that-agent/role: {{ .Values.agent.agentRole | trunc 63 | replace " " "-" | replace "," "" | replace "." "-" | lower | trimSuffix "-" | quote }}
 {{- end }}
 {{- end }}
 

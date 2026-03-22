@@ -949,6 +949,7 @@ pub async fn spawn_persistent_agent_k8s(
     parent: &str,
     model: Option<&str>,
     _env_overrides: Option<&std::collections::HashMap<String, String>>,
+    db_path: &std::path::Path,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -963,6 +964,20 @@ pub async fn spawn_persistent_agent_k8s(
     helm_install(&release_name, &ns, &sets).await?;
 
     let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");
+
+    // Register in the local agent registry so agent_task/agent_query can resolve it.
+    if let Some(cluster_dir) = cluster_dir_from_db(db_path) {
+        let reg = AgentRegistry::new(cluster_dir.join("agents.json"));
+        let _ = reg.register(AgentEntry {
+            name: name.to_string(),
+            role: role.map(str::to_string),
+            parent: Some(parent.to_string()),
+            pid: 0,
+            gateway_url: Some(gateway_url.clone()),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
     Ok(serde_json::json!({
         "name": name,
         "type": "persistent",

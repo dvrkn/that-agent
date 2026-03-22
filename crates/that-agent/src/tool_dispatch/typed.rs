@@ -2624,6 +2624,7 @@ async fn dispatch_inner(
                     parent.as_deref().unwrap_or("root"),
                     args.model.as_deref(),
                     args.env.as_ref(),
+                    Path::new(&config.memory.db_path),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
