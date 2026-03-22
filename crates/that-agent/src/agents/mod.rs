@@ -844,7 +844,6 @@ async fn helm_run(release: &str, ns: &str, sets: &[String], wait: bool) -> Resul
         helm_chart_ref(),
         "--namespace".to_string(),
         ns.to_string(),
-        "--create-namespace".to_string(),
     ];
     // Pin chart version to match the running agent's version
     if let Ok(ver) = std::env::var("THAT_HELM_CHART_VERSION") {
@@ -909,7 +908,7 @@ fn child_helm_sets(
     let mut sets = vec![
         format!("agent.name={name}"),
         format!("agent.role={role_type}"),
-        format!("agent.agentRole={agent_role}"),
+        format!("agent.agentRole={}", agent_role.replace(',', "\\,")),
         format!("agent.parent={parent}"),
         format!("agent.parentGatewayUrl={parent_gw}"),
         format!("agent.parentGatewayToken={gw_token}"),
